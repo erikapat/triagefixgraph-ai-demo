@@ -140,6 +140,15 @@ function extractIncidentIdFromText(text: string): string | null {
   return match ? match[0] : null;
 }
 
+function isIncidentScopedPrompt(text: string): boolean {
+  const normalized = text.toLowerCase();
+  if (/\brec[0-9a-z]{8,}\b/i.test(text)) return true;
+  if (/(this incident|este incidente|esta incidencia)/i.test(text)) return true;
+  if (/(incident id|incidence id|incident_id)/i.test(text)) return true;
+  if (/(explain incident|analiza incidencia|analyze incident)/i.test(normalized)) return true;
+  return false;
+}
+
 function extractIncidentIdFromGraphData(graphData: GraphData | undefined): string | null {
   if (!graphData?.results?.length) return null;
   for (const result of graphData.results) {
@@ -240,6 +249,7 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
   async function sendMessage(text?: string) {
     const messageText = text || input.trim();
     if (!messageText || loading) return;
+    const shouldAutoSyncIncident = isIncidentScopedPrompt(messageText);
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: messageText };
     setMessages((prev) => [...prev, userMessage]);
@@ -341,7 +351,7 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
                     onGraphUpdate(data.graph_data);
                   }
                   const incidentFromGraph = extractIncidentIdFromGraphData(data.graph_data);
-                  if (incidentFromGraph) {
+                  if (shouldAutoSyncIncident && incidentFromGraph) {
                     onSelectedIncidentChange?.(incidentFromGraph);
                   }
                   break;
@@ -365,6 +375,20 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
                   break;
 
                 case "done":
+                  // Defensive UI fix: if any tool missed a tool_end event,
+                  // force-close remaining running entries so timeline does not hang.
+                  if (toolCalls.some((tc) => tc.status === "running")) {
+                    toolCalls = toolCalls.map((tc) =>
+                      tc.status === "running"
+                        ? {
+                            ...tc,
+                            status: "complete" as const,
+                            output_preview: tc.output_preview || "Completed (no final tool_end event received).",
+                          }
+                        : tc
+                    );
+                    setStreamingToolCalls([...toolCalls]);
+                  }
                   // Flush any remaining buffered text
                   if (flushTimerRef.current) {
                     clearTimeout(flushTimerRef.current);
@@ -381,7 +405,7 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
                   ]);
                   {
                     const incidentFromResponse = extractIncidentIdFromText(String(data.response || fullText || ""));
-                    if (incidentFromResponse) {
+                    if (shouldAutoSyncIncident && incidentFromResponse) {
                       onSelectedIncidentChange?.(incidentFromResponse);
                     }
                   }
@@ -419,6 +443,17 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
         }
       }
     } catch (err: unknown) {
+      if (toolCalls.some((tc) => tc.status === "running")) {
+        toolCalls = toolCalls.map((tc) =>
+          tc.status === "running"
+            ? {
+                ...tc,
+                status: "complete" as const,
+                output_preview: tc.output_preview || "Stopped before tool_end (request timeout/cancel/error).",
+              }
+            : tc
+        );
+      }
       // Flush any partial streaming state
       if (flushTimerRef.current) {
         clearTimeout(flushTimerRef.current);

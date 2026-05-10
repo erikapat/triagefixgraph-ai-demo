@@ -7,6 +7,7 @@ import re
 
 from agents import Agent, Runner, function_tool
 
+from app.config import settings
 from app.context_graph_client import execute_cypher
 from app.memory import store_message, get_context, resolve_session_id
 
@@ -26,7 +27,14 @@ IMPORTANT: You MUST use available tools before answering data questions.
 Do not guess; use graph results and cite concrete fields from returned rows.
 
 CRITICAL: Call tools directly without prefacing text. Generate final narrative
-only after tool results are available."""
+only after tool results are available.
+
+SCOPE RULES:
+- If the user asks about a specific incident (explicit incident_id or "this incident"), use incident-scoped tools.
+- If the user asks a global analysis question (e.g., trends, communities, pending vs resolved patterns),
+  query across the full TriageFixManaged graph and do NOT restrict to the currently visualized incident subgraph."""
+
+GRAPH_SOURCE = settings.triagefix_graph_source
 
 
 @function_tool
@@ -48,7 +56,7 @@ async def get_top_severity_incidents(limit: str = "10") -> str:
     ORDER BY i.severity_average DESC, i.created_date DESC
     LIMIT toInteger($limit)
     """
-    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_top_severity_incidents")
+    result = await execute_cypher(cypher, {"limit": limit, "source": GRAPH_SOURCE}, tool_name="get_top_severity_incidents")
     return json.dumps(result, default=str)
 
 
@@ -95,7 +103,7 @@ async def get_incident_context(incident_id: str) -> str:
     """
     result = await execute_cypher(
         cypher,
-        {"incident_id": incident_id, "source": "airtable_enriched_sample"},
+        {"incident_id": incident_id, "source": GRAPH_SOURCE},
         tool_name="get_incident_context",
     )
     return json.dumps(result, default=str)
@@ -124,7 +132,7 @@ async def get_prior_similar_incidents(incident_id: str, limit: str = "20") -> st
     """
     result = await execute_cypher(
         cypher,
-        {"incident_id": incident_id, "limit": limit, "source": "airtable_enriched_sample"},
+        {"incident_id": incident_id, "limit": limit, "source": GRAPH_SOURCE},
         tool_name="get_prior_similar_incidents",
     )
     return json.dumps(result, default=str)
@@ -143,7 +151,7 @@ async def get_renovator_workload(limit: str = "20") -> str:
     ORDER BY incident_count DESC, avg_severity DESC, renovator ASC
     LIMIT toInteger($limit)
     """
-    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_renovator_workload")
+    result = await execute_cypher(cypher, {"limit": limit, "source": GRAPH_SOURCE}, tool_name="get_renovator_workload")
     return json.dumps(result, default=str)
 
 
@@ -159,7 +167,7 @@ async def get_missing_questions_by_category(limit: str = "50") -> str:
     ORDER BY category ASC, frequency DESC, missing_question ASC
     LIMIT toInteger($limit)
     """
-    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_missing_questions_by_category")
+    result = await execute_cypher(cypher, {"limit": limit, "source": GRAPH_SOURCE}, tool_name="get_missing_questions_by_category")
     return json.dumps(result, default=str)
 
 
@@ -178,7 +186,7 @@ async def get_evidence_coverage() -> str:
            sum(coalesce(e.furniture_budget_count, 0)) AS total_furniture_budget_docs,
            sum(coalesce(e.finance_invoice_count, 0)) AS total_finance_invoice_docs
     """
-    result = await execute_cypher(cypher, {"source": "airtable_enriched_sample"}, tool_name="get_evidence_coverage")
+    result = await execute_cypher(cypher, {"source": GRAPH_SOURCE}, tool_name="get_evidence_coverage")
     return json.dumps(result, default=str)
 
 
@@ -198,8 +206,8 @@ async def get_graph_schema() -> str:
     RETURN DISTINCT type(r) AS relationship_type
     ORDER BY relationship_type
     """
-    labels = await execute_cypher(labels_q, {"source": "airtable_enriched_sample"}, tool_name="get_graph_schema")
-    rels = await execute_cypher(rels_q, {"source": "airtable_enriched_sample"}, tool_name="get_graph_schema")
+    labels = await execute_cypher(labels_q, {"source": GRAPH_SOURCE}, tool_name="get_graph_schema")
+    rels = await execute_cypher(rels_q, {"source": GRAPH_SOURCE}, tool_name="get_graph_schema")
     return json.dumps({"labels": labels, "relationship_types": rels}, default=str)
 
 
@@ -219,6 +227,23 @@ agent = Agent(
 
 INCIDENT_ID_RE = re.compile(r"\brec[a-zA-Z0-9]{8,}\b")
 THIS_INCIDENT_RE = re.compile(r"\b(this incident|este incidente)\b", re.IGNORECASE)
+GLOBAL_SCOPE_HINT_RE = re.compile(
+    r"\b(show|visualize|anal(y|i)ze|community|communities|global|across|all incidents|pendientes|resolved|resuelt[oa]s)\b",
+    re.IGNORECASE,
+)
+
+
+def _scope_prefix_for_message(message: str) -> str:
+    has_incident_id = INCIDENT_ID_RE.search(message) is not None
+    refers_this_incident = THIS_INCIDENT_RE.search(message) is not None
+    if has_incident_id or refers_this_incident:
+        return "SCOPE: incident_scope. Use incident-focused tools and that specific incident."
+    if GLOBAL_SCOPE_HINT_RE.search(message):
+        return (
+            "SCOPE: global_scope. Query across all Incident:TriageFixManaged nodes "
+            f"for source={GRAPH_SOURCE}; do not limit to one incident unless asked."
+        )
+    return "SCOPE: global_scope unless the user explicitly asks for one incident."
 
 
 async def handle_message(message: str, session_id: str | None = None) -> dict:
@@ -248,6 +273,7 @@ async def handle_message(message: str, session_id: str | None = None) -> dict:
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
+    scoped_message = f"{_scope_prefix_for_message(message)}\n\n{scoped_message}"
 
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)
@@ -303,6 +329,7 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
+    scoped_message = f"{_scope_prefix_for_message(message)}\n\n{scoped_message}"
 
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)

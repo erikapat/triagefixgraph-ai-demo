@@ -126,6 +126,7 @@ Also supported by export script:
 
 Graph loader CSV override:
 - `TRIAGEFIX_GRAPH_INPUT_CSV` (optional)
+- `TRIAGEFIX_GRAPH_SOURCE` (optional; default: `airtable_enriched_sample`)
 
 ## 5. Data availability and sharing model
 Important for onboarding:
@@ -220,6 +221,12 @@ TRIAGEFIX_GRAPH_INPUT_CSV=data/processed/enriched_incidents_full.csv \
 uv run python scripts/04_load_triagefix_graph.py
 ```
 
+Important clarification about `source`:
+- The loader currently writes managed graph data with `source=airtable_enriched_sample`.
+- This does not force a small dataset by itself.
+- Dataset size depends on the CSV you load with `TRIAGEFIX_GRAPH_INPUT_CSV`.
+- If you load `enriched_incidents_full.csv`, the graph for `airtable_enriched_sample` becomes the full dataset.
+
 Mandatory note:
 - After any enrich/export change, you must run Step 6 again.
 - Backend/frontend startup does not reload Neo4j data automatically.
@@ -269,6 +276,13 @@ What this step does:
 ### Backend
 ```bash
 cd backend
+uv run uvicorn app.main:app --reload --port 8000
+```
+
+Optional explicit source for agent/tools:
+```bash
+cd backend
+TRIAGEFIX_GRAPH_SOURCE=airtable_enriched_sample \
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -353,6 +367,13 @@ Cause:
 
 Fix:
 - rerun loader with desired CSV input; loader replaces prior `TriageFixManaged` nodes for current source
+- full dataset reload command:
+```bash
+cd backend
+TRIAGEFIX_GRAPH_INPUT_CSV=data/processed/enriched_incidents_full.csv \
+uv run python scripts/04_load_triagefix_graph.py
+```
+- restart backend after reload
 - verify with:
 ```cypher
 MATCH (i:Incident:TriageFixManaged) RETURN count(i) AS total_incidents;

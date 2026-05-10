@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     session_strategy: str = "per_conversation"
     backend_port: int = 8000
     frontend_port: int = 3000
+    triagefix_graph_source: str = "airtable_enriched_sample"
 
 
 
