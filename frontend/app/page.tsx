@@ -178,6 +178,7 @@ export default function Home() {
           <ChatInterface
               onGraphUpdate={handleGraphUpdate}
               selectedIncidentId={selectedIncidentId}
+              onSelectedIncidentChange={setSelectedIncidentId}
               externalInput={askAboutInput}
               onExternalInputConsumed={() => setAskAboutInput(null)}
             />

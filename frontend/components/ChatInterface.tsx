@@ -44,6 +44,7 @@ interface Message {
 interface ChatInterfaceProps {
   onGraphUpdate?: (data: GraphData) => void;
   selectedIncidentId?: string | null;
+  onSelectedIncidentChange?: (incidentId: string | null) => void;
   externalInput?: string | null;
   onExternalInputConsumed?: () => void;
 }
@@ -134,7 +135,26 @@ function loadStoredSessionId(): string | null {
   }
 }
 
-export function ChatInterface({ onGraphUpdate, selectedIncidentId, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
+function extractIncidentIdFromText(text: string): string | null {
+  const match = text.match(/\brec[0-9A-Za-z]{8,}\b/);
+  return match ? match[0] : null;
+}
+
+function extractIncidentIdFromGraphData(graphData: GraphData | undefined): string | null {
+  if (!graphData?.results?.length) return null;
+  for (const result of graphData.results) {
+    const nodes = Array.isArray((result as { nodes?: unknown[] }).nodes)
+      ? ((result as { nodes?: Array<{ properties?: Record<string, unknown> }> }).nodes as Array<{ properties?: Record<string, unknown> }>)
+      : [];
+    for (const node of nodes) {
+      const incidentId = String(node?.properties?.incident_id ?? "").trim();
+      if (incidentId) return incidentId;
+    }
+  }
+  return null;
+}
+
+export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedIncidentChange, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -320,6 +340,10 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, externalInput
                   if (data.graph_data?.results?.length && onGraphUpdate) {
                     onGraphUpdate(data.graph_data);
                   }
+                  const incidentFromGraph = extractIncidentIdFromGraphData(data.graph_data);
+                  if (incidentFromGraph) {
+                    onSelectedIncidentChange?.(incidentFromGraph);
+                  }
                   break;
                 }
 
@@ -355,6 +379,12 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, externalInput
                       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
                     },
                   ]);
+                  {
+                    const incidentFromResponse = extractIncidentIdFromText(String(data.response || fullText || ""));
+                    if (incidentFromResponse) {
+                      onSelectedIncidentChange?.(incidentFromResponse);
+                    }
+                  }
                   // Attach entities/preferences from the streaming state
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];

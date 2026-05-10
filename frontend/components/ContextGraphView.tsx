@@ -46,6 +46,10 @@ interface InternalGraphData {
   nodes: GraphNode[];
   relationships: GraphRelationship[];
 }
+interface ExpansionRecord {
+  addedNodeIds: string[];
+  addedRelationshipIds: string[];
+}
 
 interface NvlNode {
   id: string;
@@ -218,7 +222,8 @@ export function ContextGraphView({
   const [selectedElement, setSelectedElement] = useState<SelectedElement | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedRelId, setSelectedRelId] = useState<string | null>(null);
-  const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(new Set());
+  const [expandedNodes, setExpandedNodes] = useState<Record<string, ExpansionRecord>>({});
+  const [baseIncidentGraph, setBaseIncidentGraph] = useState<InternalGraphData | null>(null);
   const [graphData, setGraphData] = useState<InternalGraphData | null>(null);
   const [incidents, setIncidents] = useState<Record<string, unknown>[]>([]);
   const [incidentInput, setIncidentInput] = useState("");
@@ -241,7 +246,7 @@ export function ContextGraphView({
       if (data.nodes.length > 0) {
         setGraphData(data);
         setIsSchemaView(false);
-        setExpandedNodeIds(new Set());
+        setExpandedNodes({});
         setSelectedElement(null);
         setSelectedNodeId(null);
         setSelectedRelId(null);
@@ -251,6 +256,11 @@ export function ContextGraphView({
 
   useEffect(() => {
     if (selectedIncidentId && selectedIncidentId !== incidentInput) {
+      // Keep chat-driven incident selection in sync with controls.
+      // Force Incident filter so the selected id is not overwritten by
+      // a previous field filter (e.g., Renovator).
+      setFilterField("incident_id");
+      setFilterValue(selectedIncidentId);
       setIncidentInput(selectedIncidentId);
       loadIncidentContext(selectedIncidentId);
     }
@@ -274,12 +284,15 @@ export function ContextGraphView({
   }, [incidents, filterField, filterValue]);
 
   useEffect(() => {
-    const firstFilteredId = String(filteredIncidents[0]?.incident_id ?? "").trim();
-    if (firstFilteredId) {
-      setIncidentInput(firstFilteredId);
-    } else {
-      setIncidentInput("");
+    const currentInFiltered = filteredIncidents.some(
+      (row) => String(row.incident_id ?? "").trim() === incidentInput.trim()
+    );
+    if (incidentInput.trim() && currentInFiltered) {
+      return;
     }
+
+    const firstFilteredId = String(filteredIncidents[0]?.incident_id ?? "").trim();
+    setIncidentInput(firstFilteredId || "");
   }, [filteredIncidents]);
 
   async function loadIncidents() {
@@ -324,8 +337,9 @@ export function ContextGraphView({
       console.log("incident graph", nodes.length, relationships.length);
       const parsed = extractNodesAndRels([{ nodes, relationships }]);
       setGraphData(parsed);
+      setBaseIncidentGraph(parsed);
       setIsSchemaView(false);
-      setExpandedNodeIds(new Set());
+      setExpandedNodes({});
       setFocusMode("decision_context");
       setSelectedElement(null);
       setSelectedNodeId(null);
@@ -357,7 +371,7 @@ export function ContextGraphView({
         setGraphData({ nodes, relationships: [] });
       }
       setIsSchemaView(true);
-      setExpandedNodeIds(new Set());
+      setExpandedNodes({});
       setSelectedElement(null);
     } catch {
       setError("Unable to load schema. Is the backend running?");
@@ -390,7 +404,7 @@ export function ContextGraphView({
           if (parsed.nodes.length > 0) {
             setGraphData(parsed);
             setIsSchemaView(false);
-            setExpandedNodeIds(new Set());
+            setExpandedNodes({});
           }
         } catch (err) {
           console.error("Error loading label data:", err);
@@ -400,8 +414,43 @@ export function ContextGraphView({
         return;
       }
 
-      // Data node: expand neighbors
-      if (expandedNodeIds.has(node.id)) return;
+      // Data node: toggle expand/collapse
+      if (expandedNodes[node.id]) {
+        const current = expandedNodes[node.id];
+        const otherNodeIds = Object.entries(expandedNodes)
+          .filter(([id]) => id !== node.id)
+          .flatMap(([, rec]) => rec.addedNodeIds);
+        const otherRelIds = Object.entries(expandedNodes)
+          .filter(([id]) => id !== node.id)
+          .flatMap(([, rec]) => rec.addedRelationshipIds);
+
+        const otherNodeSet = new Set(otherNodeIds);
+        const otherRelSet = new Set(otherRelIds);
+        const baseNodeSet = new Set((baseIncidentGraph?.nodes ?? []).map((n) => n.id));
+        const baseRelSet = new Set((baseIncidentGraph?.relationships ?? []).map((r) => r.id));
+
+        setGraphData({
+          nodes: graphData.nodes.filter(
+            (n) =>
+              !current.addedNodeIds.includes(n.id) ||
+              otherNodeSet.has(n.id) ||
+              baseNodeSet.has(n.id),
+          ),
+          relationships: graphData.relationships.filter(
+            (r) =>
+              !current.addedRelationshipIds.includes(r.id) ||
+              otherRelSet.has(r.id) ||
+              baseRelSet.has(r.id),
+          ),
+        });
+
+        setExpandedNodes((prev) => {
+          const next = { ...prev };
+          delete next[node.id];
+          return next;
+        });
+        return;
+      }
       setIsExpanding(true);
 
       try {
@@ -426,18 +475,20 @@ export function ContextGraphView({
           nodes: [...graphData.nodes, ...newNodes],
           relationships: [...graphData.relationships, ...newRels],
         });
-        setExpandedNodeIds((prev) => {
-          const next = new Set(prev);
-          next.add(node.id);
-          return next;
-        });
+        setExpandedNodes((prev) => ({
+          ...prev,
+          [node.id]: {
+            addedNodeIds: newNodes.map((n) => n.id),
+            addedRelationshipIds: newRels.map((r) => r.id),
+          },
+        }));
       } catch (err) {
         console.error("Error expanding node:", err);
       } finally {
         setIsExpanding(false);
       }
     },
-    [graphData, isSchemaView, isExpanding, expandedNodeIds],
+    [graphData, isSchemaView, isExpanding, expandedNodes, baseIncidentGraph],
   );
 
   // Click: select node and show properties
@@ -567,7 +618,7 @@ export function ContextGraphView({
         !!selectedIncidentId &&
         node.labels.includes("Incident") &&
         String((node.properties.incident_id as string | undefined) ?? "") === selectedIncidentId;
-      const isExpanded = expandedNodeIds.has(node.id);
+      const isExpanded = !!expandedNodes[node.id];
       const isSchema = isSchemaView;
 
       const caption =
@@ -621,7 +672,7 @@ export function ContextGraphView({
     });
 
     return { nodes, relationships };
-  }, [filteredGraphData, selectedNodeId, selectedRelId, expandedNodeIds, isSchemaView, selectedIncidentId]);
+  }, [filteredGraphData, selectedNodeId, selectedRelId, expandedNodes, isSchemaView, selectedIncidentId]);
 
   // Empty / error states
   if (error) {
@@ -675,6 +726,24 @@ export function ContextGraphView({
           <IconButton aria-label="Reload incidents" size="xs" variant="ghost" onClick={loadIncidents}>
             <RotateCcw size={14} />
           </IconButton>
+          {!isSchemaView && (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => {
+                if (baseIncidentGraph) {
+                  setGraphData(baseIncidentGraph);
+                  setExpandedNodes({});
+                  setFocusMode("decision_context");
+                  setSelectedElement(null);
+                  setSelectedNodeId(null);
+                  setSelectedRelId(null);
+                }
+              }}
+            >
+              Reset view
+            </Button>
+          )}
         </HStack>
       </Flex>
 
@@ -704,19 +773,33 @@ export function ContextGraphView({
                   </option>
                 ))}
               </select>
+              <select
+                value={filterValue}
+                onChange={(e) => setFilterValue(e.currentTarget.value)}
+                style={{
+                  flex: 1,
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.375rem",
+                  padding: "0.25rem 0.5rem",
+                  minHeight: "32px",
+                  background: "white",
+                  maxWidth: "460px",
+                }}
+              >
+                <option value="">(all)</option>
+                {availableFilterValues.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
               <Input
                 size="sm"
                 value={filterValue}
                 onChange={(e) => setFilterValue(e.target.value)}
                 placeholder={`Type ${FILTERABLE_FIELDS.find((f) => f.key === filterField)?.label || "value"}...`}
-                list="triagefix-filter-values"
-                maxW="460px"
+                maxW="320px"
               />
-              <datalist id="triagefix-filter-values">
-                {availableFilterValues.map((value) => (
-                  <option key={value} value={value} />
-                ))}
-              </datalist>
               <Button
                 size="sm"
                 disabled={!incidentInput}
@@ -927,7 +1010,7 @@ export function ContextGraphView({
         opacity={0.8}
       >
         <Text fontSize="xs" color="gray.500">
-          Scroll to zoom | Drag to pan | Click to inspect | Double-click to expand
+          Scroll to zoom | Drag to pan | Click to inspect | Double-click to expand/collapse
         </Text>
       </Box>
 
