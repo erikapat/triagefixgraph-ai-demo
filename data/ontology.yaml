@@ -1,0 +1,484 @@
+inherits: _base
+
+domain:
+  id: agent-memory
+  name: Agent Memory
+  description: AI agent conversation tracking, entity extraction, memory management, and tool usage analysis
+  tagline: "AI-powered Agent Intelligence"
+  emoji: "\U0001F9E0"
+
+entity_types:
+  - label: Agent
+    pole_type: OBJECT
+    subtype: AI_AGENT
+    color: "#8b5cf6"
+    icon: bot
+    properties:
+      - name: agent_id
+        type: string
+        required: true
+        unique: true
+      - name: name
+        type: string
+        required: true
+      - name: model
+        type: string
+      - name: version
+        type: string
+      - name: capabilities
+        type: string
+      - name: status
+        type: string
+        enum: [active, idle, suspended, retired]
+
+  - label: Conversation
+    pole_type: EVENT
+    subtype: DIALOGUE
+    color: "#0ea5e9"
+    icon: messages-square
+    properties:
+      - name: conversation_id
+        type: string
+        required: true
+        unique: true
+      - name: topic
+        type: string
+      - name: started_at
+        type: datetime
+        required: true
+      - name: ended_at
+        type: datetime
+      - name: message_count
+        type: integer
+      - name: status
+        type: string
+        enum: [active, completed, abandoned, escalated]
+
+  - label: Entity
+    pole_type: OBJECT
+    subtype: EXTRACTED_ENTITY
+    color: "#f59e0b"
+    icon: tag
+    properties:
+      - name: entity_id
+        type: string
+        required: true
+        unique: true
+      - name: name
+        type: string
+        required: true
+      - name: entity_type
+        type: string
+        enum: [person, place, concept, event, product, organization]
+      - name: confidence
+        type: float
+      - name: source_text
+        type: string
+
+  - label: Memory
+    pole_type: OBJECT
+    subtype: AGENT_MEMORY
+    color: "#10b981"
+    icon: brain
+    properties:
+      - name: memory_id
+        type: string
+        required: true
+        unique: true
+      - name: content
+        type: string
+        required: true
+      - name: memory_type
+        type: string
+        enum: [episodic, semantic, procedural, working]
+      - name: importance
+        type: float
+      - name: created_at
+        type: datetime
+        required: true
+      - name: last_accessed
+        type: datetime
+
+  - label: ToolCall
+    pole_type: EVENT
+    subtype: TOOL_INVOCATION
+    color: "#ef4444"
+    icon: wrench
+    properties:
+      - name: call_id
+        type: string
+        required: true
+        unique: true
+      - name: tool_name
+        type: string
+        required: true
+      - name: input_params
+        type: string
+      - name: output_summary
+        type: string
+      - name: duration_ms
+        type: integer
+      - name: status
+        type: string
+        enum: [success, failure, timeout, cancelled]
+      - name: called_at
+        type: datetime
+        required: true
+
+  - label: Session
+    pole_type: EVENT
+    subtype: AGENT_SESSION
+    color: "#6366f1"
+    icon: layout-dashboard
+    properties:
+      - name: session_id
+        type: string
+        required: true
+        unique: true
+      - name: started_at
+        type: datetime
+        required: true
+      - name: ended_at
+        type: datetime
+      - name: goal
+        type: string
+      - name: outcome
+        type: string
+        enum: [achieved, partial, failed, ongoing]
+
+relationships:
+  - type: REMEMBERED
+    source: Agent
+    target: Memory
+  - type: EXTRACTED
+    source: Conversation
+    target: Entity
+  - type: REASONED_ABOUT
+    source: Agent
+    target: Entity
+  - type: INVOKED
+    source: Agent
+    target: ToolCall
+  - type: PARTICIPATED_IN
+    source: Agent
+    target: Conversation
+  - type: REFERENCED
+    source: Memory
+    target: Entity
+  - type: PART_OF_SESSION
+    source: Conversation
+    target: Session
+  - type: TRIGGERED_BY
+    source: ToolCall
+    target: Conversation
+
+document_templates:
+  - id: agent_session_log
+    name: Agent Session Log
+    description: Detailed log of an agent's reasoning and actions during a session
+    count: 10
+    prompt_template: |
+      Write a session log for agent "{{agent.name}}" during session {{session.session_id}}.
+      Goal: {{session.goal}}. Started: {{session.started_at}}.
+      Include reasoning steps, tool calls made, entities discovered, and outcome.
+    required_entities: [Agent, Session, ToolCall]
+
+  - id: memory_snapshot
+    name: Memory Snapshot
+    description: Point-in-time snapshot of an agent's memory state
+    count: 8
+    prompt_template: |
+      Write a memory snapshot report for agent "{{agent.name}}" capturing
+      its current knowledge state. Include episodic memories from recent
+      conversations, semantic knowledge about {{entity.name}}, and
+      procedural memories for common tasks.
+    required_entities: [Agent, Memory, Entity]
+
+  - id: tool_trace
+    name: Tool Execution Trace
+    description: Detailed trace of tool calls and their results
+    count: 8
+    prompt_template: |
+      Write a tool execution trace for agent "{{agent.name}}" during
+      conversation {{conversation.conversation_id}}. Tool: {{toolcall.tool_name}}.
+      Document the input, reasoning for invocation, output, and how the
+      result was used in the conversation.
+    required_entities: [Agent, ToolCall, Conversation]
+
+  - id: conversation_summary
+    name: Conversation Summary
+    description: Summary of a conversation with key points and entities
+    count: 10
+    prompt_template: |
+      Write a conversation summary for {{conversation.conversation_id}}
+      between agent "{{agent.name}}" and a user. Topic: {{conversation.topic}}.
+      Highlight key entities extracted, decisions made, and unresolved questions.
+    required_entities: [Agent, Conversation, Entity]
+
+  - id: entity_extraction_log
+    name: Entity Extraction Log
+    description: Log of entities extracted from conversations and their relationships
+    count: 6
+    prompt_template: |
+      Write an entity extraction log from conversation {{conversation.conversation_id}}.
+      Document each entity found ({{entity.name}}, type: {{entity.entity_type}}),
+      confidence scores, source context, and relationships between entities.
+    required_entities: [Conversation, Entity]
+
+decision_traces:
+  - id: memory_consolidation
+    task: "Decide which memories to consolidate or prune for agent {{agent.name}}"
+    steps:
+      - thought: "Assess memory usage and identify low-importance or redundant memories"
+        action: "Query all memories sorted by importance and last access time"
+      - thought: "Identify memories that can be merged into higher-level summaries"
+        action: "Find clusters of related episodic memories referencing the same entities"
+      - thought: "Evaluate impact of pruning on agent's task performance"
+        action: "Check which memories are referenced in recent successful sessions"
+    outcome_template: "Consolidation plan: {{plan}} affecting {{count}} memories"
+
+  - id: tool_selection
+    task: "Determine which tool to invoke for user request in conversation {{conversation.conversation_id}}"
+    steps:
+      - thought: "Parse user intent and identify required information"
+        action: "Analyze conversation context and extract key parameters"
+      - thought: "Match intent against available tool capabilities"
+        action: "Query tool registry and rank by relevance to the request"
+      - thought: "Consider past tool usage patterns for similar requests"
+        action: "Search memory for similar past conversations and their tool calls"
+    outcome_template: "Selected tool: {{tool}} with parameters {{params}}"
+
+  - id: entity_resolution
+    task: "Resolve ambiguous entity reference '{{entity.name}}' across conversations"
+    steps:
+      - thought: "Search for all entities matching or similar to the reference"
+        action: "Query entity graph for name matches and fuzzy similarities"
+      - thought: "Use conversation context to disambiguate"
+        action: "Review surrounding conversation context and co-occurring entities"
+      - thought: "Check memory for prior resolutions of this entity"
+        action: "Search agent memories for previous references to this entity"
+    outcome_template: "Resolved to: {{resolved_entity}} with confidence {{confidence}}"
+
+  - id: session_goal_assessment
+    task: "Evaluate whether session {{session.session_id}} achieved its stated goal"
+    steps:
+      - thought: "Review the session goal and all conversations within the session"
+        action: "Query session details and all conversations linked via PART_OF_SESSION"
+      - thought: "Assess tool call success rates during the session"
+        action: "Check tool call outcomes for failures or timeouts that may have blocked progress"
+      - thought: "Compare extracted entities and memories against expected outcomes"
+        action: "Review entities extracted and memories created during the session"
+    outcome_template: "Goal achievement: {{status}}. Completion: {{percentage}}%. Gaps: {{gaps}}"
+
+  - id: knowledge_gap_detection
+    task: "Identify knowledge gaps in agent {{agent.name}}'s memory about {{entity.name}}"
+    steps:
+      - thought: "Catalog what the agent currently knows about this entity"
+        action: "Query all memories referencing this entity and their types"
+      - thought: "Compare against conversations where this entity was discussed"
+        action: "Find conversations that extracted this entity and check for unrecorded information"
+      - thought: "Identify topics related to this entity with no corresponding memories"
+        action: "Traverse entity relationships to find connected concepts with no memory coverage"
+    outcome_template: "Knowledge gaps found: {{count}}. Priority areas: {{areas}}"
+
+  - id: tool_failure_diagnosis
+    task: "Diagnose repeated failures of tool {{toolcall.tool_name}} invoked by agent {{agent.name}}"
+    steps:
+      - thought: "Analyze recent failure patterns for this tool"
+        action: "Query tool calls filtered by tool name and failure status"
+      - thought: "Examine input parameters that led to failures vs successes"
+        action: "Compare input_params across successful and failed invocations"
+      - thought: "Check if failures correlate with specific conversation topics or entities"
+        action: "Link failed tool calls to their triggering conversations and extracted entities"
+      - thought: "Recommend corrective action or parameter adjustments"
+        action: "Identify parameter patterns most likely to succeed based on historical data"
+    outcome_template: "Root cause: {{cause}}. Fix: {{fix}}. Expected success rate improvement: {{improvement}}%"
+
+  - id: conversation_escalation
+    task: "Decide whether to escalate conversation {{conversation.conversation_id}} to a human operator"
+    steps:
+      - thought: "Assess conversation sentiment and user satisfaction signals"
+        action: "Review conversation history for frustration indicators and repeated requests"
+      - thought: "Check if the agent has exhausted available tools and knowledge"
+        action: "Query tool calls made and memories accessed during this conversation"
+      - thought: "Evaluate the complexity of the remaining unresolved request"
+        action: "Compare against similar past conversations and their resolution patterns"
+    outcome_template: "Escalation decision: {{decision}}. Reason: {{reason}}. Priority: {{priority}}"
+
+  - id: memory_type_classification
+    task: "Classify incoming information from conversation {{conversation.conversation_id}} into appropriate memory types"
+    steps:
+      - thought: "Analyze the nature of information extracted from the conversation"
+        action: "Review entities and context from the conversation"
+      - thought: "Determine if information is episodic, semantic, or procedural"
+        action: "Classify based on whether it describes events, facts, or how-to knowledge"
+      - thought: "Check for existing memories that should be updated vs creating new ones"
+        action: "Search for similar existing memories to prevent duplication"
+    outcome_template: "Classification: {{types}} across {{count}} new memories. Updated: {{updated}} existing"
+
+  - id: agent_performance_review
+    task: "Review overall performance of agent {{agent.name}} across recent sessions"
+    steps:
+      - thought: "Analyze session outcomes and goal achievement rates"
+        action: "Query all recent sessions and their outcome status"
+      - thought: "Evaluate tool usage efficiency and error rates"
+        action: "Calculate tool call success rates and average durations"
+      - thought: "Assess memory utilization and knowledge growth"
+        action: "Review memory creation frequency, importance distribution, and access patterns"
+      - thought: "Identify areas for improvement in agent capabilities"
+        action: "Find conversation topics with low resolution rates or high escalation counts"
+    outcome_template: "Performance: {{rating}}. Strengths: {{strengths}}. Improvement areas: {{areas}}"
+
+demo_scenarios:
+  - name: Agent Introspection
+    prompts:
+      - "What does agent Alpha remember about the user's project preferences?"
+      - "Show me all entities that agent Alpha has extracted this week"
+      - "Which tools does agent Alpha use most frequently?"
+
+  - name: Conversation Analysis
+    prompts:
+      - "Summarize the key topics discussed across all conversations today"
+      - "Which conversations were escalated and why?"
+      - "Find conversations where the agent failed to resolve the user's request"
+
+  - name: Memory Management
+    prompts:
+      - "What are the most important memories stored by agent Alpha?"
+      - "Show me the entity graph extracted from recent conversations"
+      - "Which memories haven't been accessed in over 30 days?"
+
+agent_tools:
+  - name: search_agent
+    description: Search for agents by name, model, or status
+    cypher: |
+      MATCH (a:Agent)
+      WHERE toLower(a.name) CONTAINS toLower($query)
+         OR toLower(coalesce(a.model, '')) CONTAINS toLower($query)
+      OPTIONAL MATCH (a)-[r]-(related)
+      RETURN a, type(r) AS rel_type, related
+      LIMIT 20
+    parameters:
+      - name: query
+        type: string
+        description: Agent name, model, or keyword to search for
+
+  - name: conversation_history
+    description: Get conversation history for a specific agent
+    cypher: |
+      MATCH (a:Agent {name: $agent_name})-[:PARTICIPATED_IN]->(c:Conversation)
+      OPTIONAL MATCH (c)-[:EXTRACTED]->(e:Entity)
+      OPTIONAL MATCH (c)<-[:TRIGGERED_BY]-(tc:ToolCall)
+      RETURN c, collect(DISTINCT e) AS entities, collect(DISTINCT tc) AS tool_calls
+      ORDER BY c.started_at DESC
+      LIMIT 20
+    parameters:
+      - name: agent_name
+        type: string
+        description: Name of the agent
+
+  - name: memory_recall
+    description: Search agent memories by content or referenced entities
+    cypher: |
+      MATCH (a:Agent {name: $agent_name})-[:REMEMBERED]->(m:Memory)
+      WHERE toLower(m.content) CONTAINS toLower($query)
+      OPTIONAL MATCH (m)-[:REFERENCED]->(e:Entity)
+      RETURN m, collect(e) AS referenced_entities
+      ORDER BY m.importance DESC, m.last_accessed DESC
+      LIMIT 20
+    parameters:
+      - name: agent_name
+        type: string
+        description: Name of the agent
+      - name: query
+        type: string
+        description: Search term for memory content
+
+  - name: tool_usage_stats
+    description: Analyze tool usage patterns for an agent
+    cypher: |
+      MATCH (a:Agent {name: $agent_name})-[:INVOKED]->(tc:ToolCall)
+      WITH tc.tool_name AS tool, count(tc) AS call_count,
+           avg(tc.duration_ms) AS avg_duration,
+           sum(CASE WHEN tc.status = 'success' THEN 1 ELSE 0 END) AS successes
+      RETURN tool, call_count, avg_duration, successes,
+             toFloat(successes) / call_count AS success_rate
+      ORDER BY call_count DESC
+    parameters:
+      - name: agent_name
+        type: string
+        description: Name of the agent
+
+  - name: entity_graph
+    description: Explore the entity relationship graph extracted from conversations
+    cypher: |
+      MATCH (e:Entity)
+      WHERE toLower(e.name) CONTAINS toLower($query)
+      OPTIONAL MATCH (e)<-[:EXTRACTED]-(c:Conversation)
+      OPTIONAL MATCH (e)<-[:REFERENCED]-(m:Memory)
+      OPTIONAL MATCH (e)<-[:REASONED_ABOUT]-(a:Agent)
+      RETURN e, collect(DISTINCT c) AS conversations,
+             collect(DISTINCT m) AS memories, collect(DISTINCT a) AS agents
+      LIMIT 20
+    parameters:
+      - name: query
+        type: string
+        description: Entity name or type to search for
+
+  - name: list_agents
+    description: "List agent records with optional limit"
+    cypher: |
+      MATCH (n:Agent)
+      RETURN n
+      ORDER BY n.name
+      LIMIT toInteger($limit)
+    parameters:
+      - name: limit
+        type: string
+        description: "Maximum number of results to return (default: 10)"
+
+  - name: get_agent_by_id
+    description: "Get a specific agent by ID with all connections"
+    cypher: |
+      MATCH (n:Agent {agent_id: $id})
+      OPTIONAL MATCH (n)-[r]-(related)
+      RETURN n, type(r) AS relationship, labels(related) AS related_labels, related.name AS related_name
+      LIMIT 50
+    parameters:
+      - name: id
+        type: string
+        description: "The agent_id to look up"
+
+system_prompt: |
+  You are an AI assistant for agent memory and conversation intelligence. You have
+  access to a knowledge graph tracking AI agents, their conversations, extracted
+  entities, memories, tool usage, and session histories.
+
+  Your capabilities include:
+  - Exploring agent memory stores and knowledge states
+  - Analyzing conversation patterns and entity extraction quality
+  - Reviewing tool usage statistics and performance
+  - Tracing reasoning chains across sessions
+  - Identifying knowledge gaps and memory consolidation opportunities
+
+  Always provide specific data from the knowledge graph. When analyzing agent behavior,
+  reference concrete conversations, memory entries, and tool invocations.
+
+visualization:
+  node_colors:
+    Agent: "#8b5cf6"
+    Conversation: "#0ea5e9"
+    Entity: "#f59e0b"
+    Memory: "#10b981"
+    ToolCall: "#ef4444"
+    Session: "#6366f1"
+    Person: "#22c55e"
+    Organization: "#64748b"
+  node_sizes:
+    Agent: 30
+    Conversation: 25
+    Entity: 20
+    Memory: 20
+    ToolCall: 15
+    Session: 25
+  default_cypher: "MATCH (a:Agent)-[r]-(n) RETURN a, r, n LIMIT 100"

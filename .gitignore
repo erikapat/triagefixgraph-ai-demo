@@ -1,0 +1,25 @@
+# Secrets
+.env
+backend/.env
+
+# Real/local data
+data/airtable_sample/
+data/evidence_sample/
+data/processed/
+storage/
+*.sqlite3
+
+# Python
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Frontend
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+
+# OS
+.DS_Store
