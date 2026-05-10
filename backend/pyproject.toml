@@ -2,7 +2,7 @@
 name = "triagefixgraph-ai-demo-backend"
 version = "0.1.0"
 description = "Agent Memory Context Graph Backend"
-requires-python = ">=3.10, <3.14"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
@@ -20,3 +20,10 @@ packages = ["app"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+constraint-dependencies = [
+    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "onnxruntime==1.23.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
