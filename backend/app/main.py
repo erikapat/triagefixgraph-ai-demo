@@ -1,4 +1,4 @@
-"""Agent Memory Context Graph — FastAPI Application."""
+"""TriageFixGraph AI — FastAPI Application."""
 
 import logging
 import os
@@ -47,8 +47,8 @@ def get_neo4j_status() -> bool:
     return _neo4j_available
 
 app = FastAPI(
-    title="Agent Memory Context Graph",
-    description="AI agent conversation tracking, entity extraction, memory management, and tool usage analysis",
+    title="TriageFixGraph AI",
+    description="Graph-based assistant for housing maintenance incident triage",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -77,6 +77,6 @@ async def health():
     return {
         "status": "ok" if neo4j_ok else "degraded",
         "neo4j": neo4j_ok,
-        "domain": "agent-memory",
+        "domain": settings.domain_id,
         "version": "0.1.0",
     }

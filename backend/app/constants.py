@@ -1,4 +1,4 @@
-"""Constants for Agent Memory Context Graph."""
+"""Constants for TriageFixGraph AI."""
 
 # ---------------------------------------------------------------------------
 # Vector index configuration

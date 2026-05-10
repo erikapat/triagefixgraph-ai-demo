@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     neo4j_password: str = "password"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    domain_id: str = "agent-memory"
+    domain_id: str = "triagefix"
     session_strategy: str = "per_conversation"
     backend_port: int = 8000
     frontend_port: int = 3000

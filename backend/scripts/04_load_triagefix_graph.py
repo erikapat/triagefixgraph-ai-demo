@@ -330,7 +330,13 @@ def _create_historical_cases_and_similarity(session: Any) -> None:
           AND date(older.created_date) < date(newer.created_date)
           AND (
             op.property_context_id = np.property_context_id
-            OR (oc.name = nc.name AND oa.name = na.name)
+            OR (
+              oc.name = nc.name
+              AND oa.name = na.name
+              AND oc.name <> 'Otro'
+              AND coalesce(older.category_confidence, 0.0) >= 0.6
+              AND coalesce(newer.category_confidence, 0.0) >= 0.6
+            )
           )
         WITH older, newer, op, np, oc, nc, oa, na,
              CASE

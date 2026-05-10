@@ -1,4 +1,4 @@
-"""Domain models for Agent Memory — auto-generated from ontology."""
+"""Domain models from generated ontology."""
 
 from __future__ import annotations
 
@@ -140,4 +140,3 @@ class Session(BaseModel):
     ended_at: datetime | None = None
     goal: str | None = None
     outcome: SessionOutcomeEnum | None = None
-

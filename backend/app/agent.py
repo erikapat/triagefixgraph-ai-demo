@@ -1,4 +1,4 @@
-"""Agent Memory AI Agent — OpenAI Agents SDK implementation."""
+"""TriageFixGraph AI agent — OpenAI Agents SDK implementation."""
 
 from __future__ import annotations
 
@@ -6,201 +6,225 @@ import json
 
 from agents import Agent, Runner, function_tool
 
-from app.config import settings
-from app.context_graph_client import execute_cypher, get_schema
+from app.context_graph_client import execute_cypher
 from app.memory import store_message, get_context, resolve_session_id
 
 
-SYSTEM_PROMPT = """You are an AI assistant for agent memory and conversation intelligence. You have
-access to a knowledge graph tracking AI agents, their conversations, extracted
-entities, memories, tool usage, and session histories.
+SYSTEM_PROMPT = """You are an AI assistant for housing maintenance incident triage.
+You have access to the TriageFix graph in Neo4j and must base your answers on
+actual graph data from TriageFixManaged nodes.
 
 Your capabilities include:
-- Exploring agent memory stores and knowledge states
-- Analyzing conversation patterns and entity extraction quality
-- Reviewing tool usage statistics and performance
-- Tracing reasoning chains across sessions
-- Identifying knowledge gaps and memory consolidation opportunities
+- Prioritizing incidents by severity and urgency
+- Explaining incident context (property, area, category, status, provider)
+- Finding prior similar incidents and historical routing context
+- Summarizing provider workload and coverage
+- Identifying missing questions and evidence gaps
 
-Always provide specific data from the knowledge graph. When analyzing agent behavior,
-reference concrete conversations, memory entries, and tool invocations.
+IMPORTANT: You MUST use available tools before answering data questions.
+Do not guess; use graph results and cite concrete fields from returned rows.
 
+CRITICAL: Call tools directly without prefacing text. Generate final narrative
+only after tool results are available."""
 
-IMPORTANT: You MUST use the available tools to query the knowledge graph before answering any question about the data. Never guess or make up information — always use tools to look up actual data from the graph.
-
-CRITICAL: Call tools DIRECTLY without any introductory text. Do NOT say "I'll search for..." or "Let me look up..." before calling a tool — just call the tool immediately. Only generate text AFTER you have received the tool results and are ready to provide your final answer."""
-
-# ---------------------------------------------------------------------------
-# Agent tools — domain-specific for Agent Memory
-# ---------------------------------------------------------------------------
 
 @function_tool
-async def search_agent(query: str) -> str:
-    """Search for agents by name, model, or status"""
-    cypher = """MATCH (a:Agent)
-    WHERE toLower(a.name) CONTAINS toLower($query)
-       OR toLower(coalesce(a.model, '')) CONTAINS toLower($query)
-    OPTIONAL MATCH (a)-[r]-(related)
-    RETURN a, type(r) AS rel_type, related
-    LIMIT 20
-"""
-    params = {
-        "query": query,
-    }
-    result = await execute_cypher(cypher, params, tool_name="search_agent")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def conversation_history(agent_name: str) -> str:
-    """Get conversation history for a specific agent"""
-    cypher = """MATCH (a:Agent {name: $agent_name})-[:PARTICIPATED_IN]->(c:Conversation)
-    OPTIONAL MATCH (c)-[:EXTRACTED]->(e:Entity)
-    OPTIONAL MATCH (c)<-[:TRIGGERED_BY]-(tc:ToolCall)
-    RETURN c, collect(DISTINCT e) AS entities, collect(DISTINCT tc) AS tool_calls
-    ORDER BY c.started_at DESC
-    LIMIT 20
-"""
-    params = {
-        "agent_name": agent_name,
-    }
-    result = await execute_cypher(cypher, params, tool_name="conversation_history")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def memory_recall(agent_name: str, query: str) -> str:
-    """Search agent memories by content or referenced entities"""
-    cypher = """MATCH (a:Agent {name: $agent_name})-[:REMEMBERED]->(m:Memory)
-    WHERE toLower(m.content) CONTAINS toLower($query)
-    OPTIONAL MATCH (m)-[:REFERENCED]->(e:Entity)
-    RETURN m, collect(e) AS referenced_entities
-    ORDER BY m.importance DESC, m.last_accessed DESC
-    LIMIT 20
-"""
-    params = {
-        "agent_name": agent_name,
-        "query": query,
-    }
-    result = await execute_cypher(cypher, params, tool_name="memory_recall")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def tool_usage_stats(agent_name: str) -> str:
-    """Analyze tool usage patterns for an agent"""
-    cypher = """MATCH (a:Agent {name: $agent_name})-[:INVOKED]->(tc:ToolCall)
-    WITH tc.tool_name AS tool, count(tc) AS call_count,
-         avg(tc.duration_ms) AS avg_duration,
-         sum(CASE WHEN tc.status = 'success' THEN 1 ELSE 0 END) AS successes
-    RETURN tool, call_count, avg_duration, successes,
-           toFloat(successes) / call_count AS success_rate
-    ORDER BY call_count DESC
-"""
-    params = {
-        "agent_name": agent_name,
-    }
-    result = await execute_cypher(cypher, params, tool_name="tool_usage_stats")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def entity_graph(query: str) -> str:
-    """Explore the entity relationship graph extracted from conversations"""
-    cypher = """MATCH (e:Entity)
-    WHERE toLower(e.name) CONTAINS toLower($query)
-    OPTIONAL MATCH (e)<-[:EXTRACTED]-(c:Conversation)
-    OPTIONAL MATCH (e)<-[:REFERENCED]-(m:Memory)
-    OPTIONAL MATCH (e)<-[:REASONED_ABOUT]-(a:Agent)
-    RETURN e, collect(DISTINCT c) AS conversations,
-           collect(DISTINCT m) AS memories, collect(DISTINCT a) AS agents
-    LIMIT 20
-"""
-    params = {
-        "query": query,
-    }
-    result = await execute_cypher(cypher, params, tool_name="entity_graph")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def list_agents(limit: str) -> str:
-    """List agent records with optional limit"""
-    cypher = """MATCH (n:Agent)
-    RETURN n
-    ORDER BY n.name
+async def get_top_severity_incidents(limit: str = "10") -> str:
+    """Get top incidents ranked by severity_average."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source})
+    OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+    OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+    OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
+    RETURN i.incident_id AS incident_id,
+           i.created_date AS created_date,
+           i.severity_average AS severity_average,
+           c.name AS category,
+           u.name AS urgency,
+           t.name AS recommended_trade,
+           i.provider_confidence AS provider_confidence,
+           left(i.clean_description, 220) AS description_preview
+    ORDER BY i.severity_average DESC, i.created_date DESC
     LIMIT toInteger($limit)
-"""
-    params = {
-        "limit": limit,
-    }
-    result = await execute_cypher(cypher, params, tool_name="list_agents")
-    return json.dumps(result, default=str)
-
-@function_tool
-async def get_agent_by_id(id: str) -> str:
-    """Get a specific agent by ID with all connections"""
-    cypher = """MATCH (n:Agent {agent_id: $id})
-    OPTIONAL MATCH (n)-[r]-(related)
-    RETURN n, type(r) AS relationship, labels(related) AS related_labels, related.name AS related_name
-    LIMIT 50
-"""
-    params = {
-        "id": id,
-    }
-    result = await execute_cypher(cypher, params, tool_name="get_agent_by_id")
+    """
+    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_top_severity_incidents")
     return json.dumps(result, default=str)
 
 
+@function_tool
+async def get_incident_context(incident_id: str) -> str:
+    """Get full triage context for a single incident."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+    OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+    OPTIONAL MATCH (p)-[:LOCATED_IN_AREA]->(a:AreaCluster)
+    OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+    OPTIONAL MATCH (i)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
+    OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+    OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+    OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
+    OPTIONAL MATCH (i)-[:HANDLED_BY]->(r:Renovator)
+    OPTIONAL MATCH (i)-[:RECOMMENDED_ACTION]->(ra:RecommendedAction)
+    OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
+    OPTIONAL MATCH (i)-[:NEEDS_QUESTION]->(mq:MissingQuestion)
+    OPTIONAL MATCH (i)-[:HAS_SEVERITY_SIGNAL]->(ss:SeveritySignal)
+    RETURN i.incident_id AS incident_id,
+           i.created_date AS created_date,
+           i.resolved_date AS resolved_date,
+           i.severity_average AS severity_average,
+           i.provider_confidence AS provider_confidence,
+           i.clean_description AS clean_description,
+           p.property_context_id AS property_context_id,
+           a.name AS area_cluster,
+           c.name AS category,
+           sc.name AS subcategory,
+           u.name AS urgency,
+           s.name AS status,
+           t.name AS recommended_trade,
+           r.name AS provider_candidate,
+           ra.name AS recommended_action,
+           e.evidence_id AS evidence_id,
+           e.has_incidence_docs AS has_incidence_docs,
+           e.incidence_docs_count AS incidence_docs_count,
+           e.lease_contract_count AS lease_contract_count,
+           e.furniture_budget_count AS furniture_budget_count,
+           e.finance_invoice_count AS finance_invoice_count,
+           collect(DISTINCT mq.text) AS missing_questions,
+           collect(DISTINCT {dimension: ss.dimension, score: ss.score}) AS severity_signals
+    """
+    result = await execute_cypher(
+        cypher,
+        {"incident_id": incident_id, "source": "airtable_enriched_sample"},
+        tool_name="get_incident_context",
+    )
+    return json.dumps(result, default=str)
+
 
 @function_tool
-async def run_cypher(query: str, parameters: str = "{}") -> str:
-    """Execute a read-only Cypher query against the knowledge graph."""
-    try:
-        params = json.loads(parameters) if parameters else {}
-    except json.JSONDecodeError:
-        return json.dumps({"error": "Invalid JSON parameters"})
-    params.setdefault("domain", settings.domain_id)
-    try:
-        result = await execute_cypher(query, params, tool_name="run_cypher")
-        return json.dumps(result, default=str)
-    except Exception as e:
-        return json.dumps({"error": f"Cypher query failed: {e}"})
+async def get_prior_similar_incidents(incident_id: str, limit: str = "20") -> str:
+    """Get prior similar incidents connected through PRIOR_SIMILAR."""
+    cypher = """
+    MATCH (prior:Incident:TriageFixManaged {source: $source})-[r:PRIOR_SIMILAR]->(current:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+    OPTIONAL MATCH (prior)-[:HAS_CATEGORY]->(c:Category)
+    OPTIONAL MATCH (prior)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+    OPTIONAL MATCH (prior)-[:HANDLED_BY]->(ren:Renovator)
+    RETURN current.incident_id AS incident_id,
+           prior.incident_id AS prior_incident_id,
+           r.reason AS reason,
+           r.older_created_date AS prior_created_date,
+           r.newer_created_date AS current_created_date,
+           c.name AS category,
+           p.property_context_id AS property_context_id,
+           ren.name AS prior_renovator,
+           prior.severity_average AS prior_severity_average,
+           left(prior.clean_description, 200) AS prior_description_preview
+    ORDER BY prior_created_date DESC
+    LIMIT toInteger($limit)
+    """
+    result = await execute_cypher(
+        cypher,
+        {"incident_id": incident_id, "limit": limit, "source": "airtable_enriched_sample"},
+        tool_name="get_prior_similar_incidents",
+    )
+    return json.dumps(result, default=str)
+
+
+@function_tool
+async def get_renovator_workload(limit: str = "20") -> str:
+    """Get renovator workload distribution by category."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source})-[:HANDLED_BY]->(r:Renovator)
+    OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+    RETURN r.name AS renovator,
+           c.name AS category,
+           count(i) AS incident_count,
+           round(avg(i.severity_average), 2) AS avg_severity
+    ORDER BY incident_count DESC, avg_severity DESC, renovator ASC
+    LIMIT toInteger($limit)
+    """
+    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_renovator_workload")
+    return json.dumps(result, default=str)
+
+
+@function_tool
+async def get_missing_questions_by_category(limit: str = "50") -> str:
+    """Get missing questions grouped by incident category."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source})-[:HAS_CATEGORY]->(c:Category)
+    MATCH (i)-[:NEEDS_QUESTION]->(mq:MissingQuestion)
+    RETURN c.name AS category,
+           mq.text AS missing_question,
+           count(*) AS frequency
+    ORDER BY category ASC, frequency DESC, missing_question ASC
+    LIMIT toInteger($limit)
+    """
+    result = await execute_cypher(cypher, {"limit": limit, "source": "airtable_enriched_sample"}, tool_name="get_missing_questions_by_category")
+    return json.dumps(result, default=str)
+
+
+@function_tool
+async def get_evidence_coverage() -> str:
+    """Get evidence coverage metrics across incidents."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source})
+    OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
+    RETURN count(i) AS total_incidents,
+           count(DISTINCT CASE WHEN e IS NOT NULL THEN i END) AS incidents_with_evidence,
+           round(100.0 * count(DISTINCT CASE WHEN e IS NOT NULL THEN i END) / count(i), 2) AS evidence_coverage_pct,
+           count(DISTINCT CASE WHEN e.has_incidence_docs THEN i END) AS incidents_with_incidence_docs,
+           sum(coalesce(e.incidence_docs_count, 0)) AS total_incidence_docs,
+           sum(coalesce(e.lease_contract_count, 0)) AS total_lease_contract_docs,
+           sum(coalesce(e.furniture_budget_count, 0)) AS total_furniture_budget_docs,
+           sum(coalesce(e.finance_invoice_count, 0)) AS total_finance_invoice_docs
+    """
+    result = await execute_cypher(cypher, {"source": "airtable_enriched_sample"}, tool_name="get_evidence_coverage")
+    return json.dumps(result, default=str)
 
 
 @function_tool
 async def get_graph_schema() -> str:
-    """Get the knowledge graph schema (node labels and relationship types)."""
-    result = await get_schema()
-    return json.dumps(result, default=str)
+    """Get current TriageFix graph schema from managed nodes."""
+    labels_q = """
+    MATCH (n:TriageFixManaged {source: $source})
+    UNWIND labels(n) AS l
+    WITH DISTINCT l
+    WHERE l <> 'TriageFixManaged'
+    RETURN l AS label
+    ORDER BY label
+    """
+    rels_q = """
+    MATCH (a:TriageFixManaged {source: $source})-[r]->(b:TriageFixManaged {source: $source})
+    RETURN DISTINCT type(r) AS relationship_type
+    ORDER BY relationship_type
+    """
+    labels = await execute_cypher(labels_q, {"source": "airtable_enriched_sample"}, tool_name="get_graph_schema")
+    rels = await execute_cypher(rels_q, {"source": "airtable_enriched_sample"}, tool_name="get_graph_schema")
+    return json.dumps({"labels": labels, "relationship_types": rels}, default=str)
+
 
 agent = Agent(
-    name="Agent Memory Assistant",
+    name="TriageFixGraph Assistant",
     instructions=SYSTEM_PROMPT,
     tools=[
-        search_agent,
-        conversation_history,
-        memory_recall,
-        tool_usage_stats,
-        entity_graph,
-        list_agents,
-        get_agent_by_id,
-        run_cypher,
+        get_top_severity_incidents,
+        get_incident_context,
+        get_prior_similar_incidents,
+        get_renovator_workload,
+        get_missing_questions_by_category,
+        get_evidence_coverage,
         get_graph_schema,
     ],
 )
-
-
-# ---------------------------------------------------------------------------
-# Message handler
-# ---------------------------------------------------------------------------
 
 
 async def handle_message(message: str, session_id: str | None = None) -> dict:
     """Handle an incoming chat message."""
     session_id = resolve_session_id(session_id)
 
-    # Retrieve conversation history and store the new user message
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)
     history = context.get("messages", [])
 
-    # Build input with structured conversation history
     if history:
         history_block = "\n\n".join(
             f"[{m['role'].upper()}]\n{m['content']}" for m in history
@@ -237,7 +261,6 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
     context = await get_context(session_id, query=message)
     history = context.get("messages", [])
 
-    # Build input with structured conversation history
     if history:
         history_block = "\n\n".join(
             f"[{m['role'].upper()}]\n{m['content']}" for m in history
@@ -254,8 +277,6 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
     async for event in result.stream_events():
         if event.type == "raw_response_event":
             data = event.data
-            # Only emit text content deltas — skip tool call argument deltas
-            # which would otherwise leak raw JSON into the response stream.
             event_type = getattr(data, "type", "")
             if event_type == "response.output_text.delta":
                 delta = getattr(data, "delta", "")

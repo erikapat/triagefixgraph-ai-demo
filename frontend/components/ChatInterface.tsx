@@ -656,7 +656,7 @@ export function ChatInterface({ onGraphUpdate, externalInput, onExternalInputCon
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about your agent memory data..."
+            placeholder="Ask about incidents, severity, routing, or prior similar cases..."
             border="none"
             _focus={{ boxShadow: "none" }}
             resize="none"

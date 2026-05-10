@@ -73,6 +73,8 @@ interface ContextGraphViewProps {
   onAskAbout?: (entityName: string) => void;
 }
 
+const TECHNICAL_LABELS = new Set(["TriageFixManaged"]);
+
 // ---------------------------------------------------------------------------
 // Helpers — convert backend serialized data to internal format
 // ---------------------------------------------------------------------------
@@ -95,10 +97,13 @@ function extractNodesAndRels(results: Record<string, unknown>[]): InternalGraphD
     if (Array.isArray(v.labels) && v.elementId) {
       const id = String(v.elementId);
       if (!nodeMap.has(id)) {
+        const sanitizedLabels = (v.labels as string[]).filter(
+          (label) => !TECHNICAL_LABELS.has(label),
+        );
         const { elementId, labels, ...props } = v;
         nodeMap.set(id, {
           id,
-          labels: labels as string[],
+          labels: sanitizedLabels.length > 0 ? sanitizedLabels : ["Node"],
           properties: props,
         });
       }
@@ -239,7 +244,7 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              query: `MATCH (n:\`${label}\`)-[r]-(m) RETURN n, r, m LIMIT 50`,
+              query: `MATCH (n:TriageFixManaged:\`${label}\`)-[r]-(m:TriageFixManaged) RETURN n, r, m LIMIT 50`,
             }),
             signal: AbortSignal.timeout(10000),
           });
@@ -422,7 +427,7 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
           <Text fontSize="xs" color="gray.500">
             {isSchemaView
               ? "Schema view — double-click a label to explore"
-              : "Agent Memory entity relationships"}
+              : "TriageFix incident relationships"}
           </Text>
         </Box>
         {!isSchemaView && (
@@ -640,10 +645,10 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
           <Flex h="100%" align="center" justify="center" direction="column" gap={4} p={8}>
             <Box color="gray.400" fontSize="4xl">🔗</Box>
             <Text color="gray.400" fontWeight="medium" fontSize="lg">
-              Your knowledge graph will appear here
+              Your TriageFix graph will appear here
             </Text>
             <Text color="gray.500" fontSize="sm" textAlign="center" maxW="300px">
-              Ask a question in the chat to query entities, or double-click a node in the schema view to explore data.
+              Ask a question in the chat, or double-click a node in schema view to explore incident context.
             </Text>
           </Flex>
         )}

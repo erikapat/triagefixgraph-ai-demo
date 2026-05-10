@@ -263,26 +263,24 @@ async def get_entity_graph(entity_name: str, depth: int = 2) -> dict:
 
 
 async def get_schema() -> dict:
-    """Get the graph database schema, scoped to the current domain."""
-    from app.config import settings
-    # Get labels that actually exist in domain data
+    """Get graph schema, preferring TriageFix-managed data."""
     labels_result = await execute_cypher(
         """
-        MATCH (n) WHERE n.domain IS NULL OR n.domain = $domain
-        WITH DISTINCT labels(n) AS ls UNWIND ls AS l
-        RETURN DISTINCT l AS label ORDER BY label
+        MATCH (n:TriageFixManaged)
+        UNWIND labels(n) AS l
+        WITH DISTINCT l
+        WHERE l <> 'TriageFixManaged'
+        RETURN l AS label
+        ORDER BY label
         """,
-        {"domain": settings.domain_id},
         collect=False,
     )
     rel_types_result = await execute_cypher(
         """
-        MATCH (a)-[r]->(b)
-        WHERE (a.domain IS NULL OR a.domain = $domain)
-          AND (b.domain IS NULL OR b.domain = $domain)
-        RETURN DISTINCT type(r) AS relationshipType ORDER BY relationshipType
+        MATCH (a:TriageFixManaged)-[r]->(b:TriageFixManaged)
+        RETURN DISTINCT type(r) AS relationshipType
+        ORDER BY relationshipType
         """,
-        {"domain": settings.domain_id},
         collect=False,
     )
     return {
@@ -297,7 +295,6 @@ async def get_schema_visualization() -> dict:
     Uses db.schema.visualization() filtered to only labels that exist
     in the current domain's data.
     """
-    from app.config import settings
     try:
         results = await execute_cypher(
             "CALL db.schema.visualization() YIELD nodes, relationships RETURN nodes, relationships",
@@ -305,19 +302,18 @@ async def get_schema_visualization() -> dict:
         )
         if results:
             raw = results[0]
-            # Get labels that exist in domain data to filter schema
-            domain_labels_result = await execute_cypher(
+            # Prefer labels present in TriageFix-managed graph data.
+            managed_labels_result = await execute_cypher(
                 """
-                MATCH (n) WHERE n.domain IS NULL OR n.domain = $domain
-                WITH DISTINCT labels(n) AS ls UNWIND ls AS l
-                RETURN collect(DISTINCT l) AS domain_labels
+                MATCH (n:TriageFixManaged)
+                UNWIND labels(n) AS l
+                WITH DISTINCT l
+                WHERE l <> 'TriageFixManaged'
+                RETURN collect(l) AS triage_labels
                 """,
-                {"domain": settings.domain_id},
                 collect=False,
             )
-            domain_labels = set(domain_labels_result[0]["domain_labels"]) if domain_labels_result else set()
-            # Also include infrastructure labels
-            domain_labels |= {"Document", "DecisionTrace", "TraceStep"}
+            domain_labels = set(managed_labels_result[0]["triage_labels"]) if managed_labels_result else set()
 
             # Filter schema nodes to only domain-relevant labels
             filtered_nodes = []
@@ -360,15 +356,13 @@ async def get_schema_visualization() -> dict:
 
 async def expand_node(element_id: str) -> dict:
     """Get immediate neighbors of a node for graph expansion."""
-    from app.config import settings
     cypher = """
-    MATCH (n) WHERE elementId(n) = $elementId
-    OPTIONAL MATCH (n)-[r]-(m)
-    WHERE m.domain IS NULL OR m.domain = $domain
+    MATCH (n:TriageFixManaged) WHERE elementId(n) = $elementId
+    OPTIONAL MATCH (n)-[r]-(m:TriageFixManaged)
     RETURN collect(DISTINCT n) + collect(DISTINCT m) AS nodes,
            collect(DISTINCT r) AS relationships
     """
-    results = await execute_cypher(cypher, {"elementId": element_id, "domain": settings.domain_id}, collect=False)
+    results = await execute_cypher(cypher, {"elementId": element_id}, collect=False)
     if results:
         return results[0]
     return {"nodes": [], "relationships": []}

@@ -1,4 +1,4 @@
-"""API routes for Agent Memory Context Graph."""
+"""API routes for TriageFixGraph AI."""
 
 from __future__ import annotations
 
@@ -345,6 +345,131 @@ async def get_entity_detail(name: str):
 async def scenarios():
     """Get demo scenarios for the frontend."""
     return {
-        "domain": "Agent Memory",
-        "scenarios": [{"name": "Agent Introspection", "prompts": ["What does agent Alpha remember about the user\u0027s project preferences?", "Show me all entities that agent Alpha has extracted this week", "Which tools does agent Alpha use most frequently?"]}, {"name": "Conversation Analysis", "prompts": ["Summarize the key topics discussed across all conversations today", "Which conversations were escalated and why?", "Find conversations where the agent failed to resolve the user\u0027s request"]}, {"name": "Memory Management", "prompts": ["What are the most important memories stored by agent Alpha?", "Show me the entity graph extracted from recent conversations", "Which memories haven\u0027t been accessed in over 30 days?"]}],
+        "domain": "TriageFixGraph AI",
+        "scenarios": [
+            {
+                "name": "Incident triage",
+                "prompts": [
+                    "Show the highest severity incidents",
+                    "Explain this incident using graph context",
+                    "What is the recommended action and why?",
+                ],
+            },
+            {
+                "name": "Historical context",
+                "prompts": [
+                    "Which prior similar incidents are connected?",
+                    "Show incidents for the same property context",
+                    "Compare severity and outcomes with earlier incidents",
+                ],
+            },
+            {
+                "name": "Provider routing",
+                "prompts": [
+                    "Which renovator handled similar cases?",
+                    "Show renovator workload by category",
+                    "Which trade specialist is recommended for urgent incidents?",
+                ],
+            },
+            {
+                "name": "Evidence and missing questions",
+                "prompts": [
+                    "Show evidence and severity signals for this incident",
+                    "What information is missing before routing this incident?",
+                    "Which missing questions are most frequent by category?",
+                ],
+            },
+            {
+                "name": "Severity explanation",
+                "prompts": [
+                    "Break down severity signals for this incident",
+                    "Why is this incident high priority?",
+                    "Which incidents combine high urgency and high material damage risk?",
+                ],
+            },
+        ],
+    }
+
+
+@router.get("/triagefix/summary")
+async def triagefix_summary():
+    """Get summary metrics for the current TriageFix graph."""
+    _require_neo4j()
+    source = "airtable_enriched_sample"
+    labels = [
+        "Incident",
+        "PropertyContext",
+        "AreaCluster",
+        "Category",
+        "Subcategory",
+        "Urgency",
+        "Status",
+        "TradeSpecialist",
+        "Renovator",
+        "RecommendedAction",
+        "Evidence",
+        "MissingQuestion",
+        "SeveritySignal",
+        "ResolutionTimeBand",
+        "HistoricalCase",
+    ]
+    node_counts: dict[str, int] = {}
+    for label in labels:
+        rec = await execute_cypher(
+            f"MATCH (n:{label}:TriageFixManaged {{source: $source}}) RETURN count(n) AS c",
+            {"source": source},
+        )
+        node_counts[label] = int(rec[0]["c"]) if rec else 0
+
+    rel_counts_rows = await execute_cypher(
+        """
+        MATCH (a:TriageFixManaged {source: $source})-[r]->(b:TriageFixManaged {source: $source})
+        RETURN type(r) AS relationship_type, count(r) AS relationship_count
+        ORDER BY relationship_count DESC, relationship_type ASC
+        """,
+        {"source": source},
+    )
+
+    top_categories = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source})-[:HAS_CATEGORY]->(c:Category)
+        RETURN c.name AS category, count(i) AS incidents
+        ORDER BY incidents DESC, category ASC
+        LIMIT 10
+        """,
+        {"source": source},
+    )
+
+    top_renovators = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source})-[:HANDLED_BY]->(r:Renovator)
+        RETURN r.name AS renovator, count(i) AS incidents
+        ORDER BY incidents DESC, renovator ASC
+        LIMIT 10
+        """,
+        {"source": source},
+    )
+
+    prior_similar_rows = await execute_cypher(
+        """
+        MATCH (:Incident:TriageFixManaged {source: $source})-[r:PRIOR_SIMILAR]->(:Incident:TriageFixManaged {source: $source})
+        RETURN count(r) AS c
+        """,
+        {"source": source},
+    )
+    incidents_with_evidence_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source})-[:HAS_EVIDENCE]->(:Evidence)
+        RETURN count(DISTINCT i) AS c
+        """,
+        {"source": source},
+    )
+
+    return {
+        "node_counts": node_counts,
+        "relationship_counts": rel_counts_rows,
+        "top_categories": top_categories,
+        "top_renovators": top_renovators,
+        "prior_similar_relationships": int(prior_similar_rows[0]["c"]) if prior_similar_rows else 0,
+        "incidents_with_evidence": int(incidents_with_evidence_rows[0]["c"]) if incidents_with_evidence_rows else 0,
     }
