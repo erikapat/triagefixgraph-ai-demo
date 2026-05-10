@@ -313,17 +313,37 @@ def _create_historical_cases_and_similarity(session: Any) -> None:
         source=SOURCE_VALUE,
     ).consume()
 
-    # PRIOR_SIMILAR: older incidents -> newer incidents by created_date within same similarity_key.
+    # PRIOR_SIMILAR: older incidents -> newer incidents with broader similarity for small samples.
     session.run(
         f"""
         MATCH (older:Incident:{MANAGED_LABEL} {{source: $source}})
         MATCH (newer:Incident:{MANAGED_LABEL} {{source: $source}})
-        WHERE older.similarity_key = newer.similarity_key
-          AND older.incident_id <> newer.incident_id
+        MATCH (older)-[:HAS_PROPERTY_CONTEXT]->(op:PropertyContext)
+        MATCH (newer)-[:HAS_PROPERTY_CONTEXT]->(np:PropertyContext)
+        MATCH (older)-[:HAS_CATEGORY]->(oc:Category)
+        MATCH (newer)-[:HAS_CATEGORY]->(nc:Category)
+        MATCH (op)-[:LOCATED_IN_AREA]->(oa:AreaCluster)
+        MATCH (np)-[:LOCATED_IN_AREA]->(na:AreaCluster)
+        WHERE older.incident_id <> newer.incident_id
           AND older.created_date IS NOT NULL
           AND newer.created_date IS NOT NULL
           AND date(older.created_date) < date(newer.created_date)
-        MERGE (older)-[:PRIOR_SIMILAR]->(newer)
+          AND (
+            op.property_context_id = np.property_context_id
+            OR (oc.name = nc.name AND oa.name = na.name)
+          )
+        WITH older, newer, op, np, oc, nc, oa, na,
+             CASE
+               WHEN op.property_context_id = np.property_context_id THEN 'same_property'
+               ELSE 'same_category_area'
+             END AS reason
+        WITH older, newer, reason
+        ORDER BY reason ASC
+        WITH older, newer, collect(reason)[0] AS chosen_reason
+        MERGE (older)-[r:PRIOR_SIMILAR]->(newer)
+        SET r.reason = chosen_reason,
+            r.older_created_date = older.created_date,
+            r.newer_created_date = newer.created_date
         """,
         source=SOURCE_VALUE,
     ).consume()
@@ -480,6 +500,7 @@ def main() -> int:
                 source=SOURCE_VALUE,
             ).single()
             incidents_with_questions = int(rec_questions["c"] if rec_questions else 0)
+            prior_similar_count = rel_counts.get("PRIOR_SIMILAR", 0)
 
             print(f"number of rows read: {len(rows)}")
             print("node counts by label:")
@@ -494,6 +515,7 @@ def main() -> int:
 
             print(f"number of incidents with evidence: {incidents_with_evidence}")
             print(f"number of incidents with missing questions: {incidents_with_questions}")
+            print(f"PRIOR_SIMILAR count: {prior_similar_count}")
     finally:
         driver.close()
 
