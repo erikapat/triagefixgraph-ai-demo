@@ -10,8 +10,10 @@ dependencies = [
     "pydantic-settings>=2.0",
     "neo4j>=5.20",
     "neo4j-agent-memory[spacy,gliner]>=0.1.0",
-    "sentence-transformers>=2.0",
+    "sentence-transformers==2.7.0",
     "openai-agents>=0.1",
+    "numpy<2",
+    "transformers==4.41.2",
 ]
 
 [tool.hatch.build.targets.wheel]

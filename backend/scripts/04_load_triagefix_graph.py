@@ -6,7 +6,6 @@ from __future__ import annotations
 import ast
 import csv
 import os
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +15,7 @@ from neo4j import GraphDatabase
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
-INPUT_CSV = REPO_ROOT / "data" / "processed" / "enriched_incidents_demo.csv"
+DEFAULT_INPUT_CSV = REPO_ROOT / "data" / "processed" / "enriched_incidents_demo.csv"
 
 SOURCE_VALUE = "airtable_enriched_sample"
 MANAGED_LABEL = "TriageFixManaged"
@@ -313,57 +312,23 @@ def _create_historical_cases_and_similarity(session: Any) -> None:
         source=SOURCE_VALUE,
     ).consume()
 
-    # PRIOR_SIMILAR: older incidents -> newer incidents with broader similarity for small samples.
+    # PRIOR_SIMILAR: older incidents -> newer incidents based on same property history only.
     session.run(
         f"""
         MATCH (older:Incident:{MANAGED_LABEL} {{source: $source}})
         MATCH (newer:Incident:{MANAGED_LABEL} {{source: $source}})
         MATCH (older)-[:HAS_PROPERTY_CONTEXT]->(op:PropertyContext)
         MATCH (newer)-[:HAS_PROPERTY_CONTEXT]->(np:PropertyContext)
-        MATCH (older)-[:HAS_CATEGORY]->(oc:Category)
-        MATCH (newer)-[:HAS_CATEGORY]->(nc:Category)
-        MATCH (op)-[:LOCATED_IN_AREA]->(oa:AreaCluster)
-        MATCH (np)-[:LOCATED_IN_AREA]->(na:AreaCluster)
         WHERE older.incident_id <> newer.incident_id
           AND older.created_date IS NOT NULL
           AND newer.created_date IS NOT NULL
           AND date(older.created_date) < date(newer.created_date)
-          AND (
-            op.property_context_id = np.property_context_id
-            OR (
-              oc.name = nc.name
-              AND oa.name = na.name
-              AND oc.name <> 'Otro'
-              AND coalesce(older.category_confidence, 0.0) >= 0.6
-              AND coalesce(newer.category_confidence, 0.0) >= 0.6
-            )
-          )
-        WITH older, newer, op, np, oc, nc, oa, na,
-             CASE
-               WHEN op.property_context_id = np.property_context_id THEN 'same_property'
-               ELSE 'same_category_area'
-             END AS reason
-        WITH older, newer, reason
-        ORDER BY reason ASC
-        WITH older, newer, collect(reason)[0] AS chosen_reason
+          AND op.property_context_id = np.property_context_id
         MERGE (older)-[r:PRIOR_SIMILAR]->(newer)
-        SET r.reason = chosen_reason,
+        SET r.reason = 'same_property',
+            r.similarity_type = 'property_history',
             r.older_created_date = older.created_date,
             r.newer_created_date = newer.created_date
-        """,
-        source=SOURCE_VALUE,
-    ).consume()
-
-    # SIMILAR_TO between incidents sharing category and property context.
-    session.run(
-        f"""
-        MATCH (a:Incident:{MANAGED_LABEL} {{source: $source}})-[:HAS_CATEGORY]->(c:Category)
-        MATCH (a)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
-        MATCH (b:Incident:{MANAGED_LABEL} {{source: $source}})-[:HAS_CATEGORY]->(c)
-        MATCH (b)-[:HAS_PROPERTY_CONTEXT]->(p)
-        WHERE a.incident_id < b.incident_id
-        MERGE (a)-[:SIMILAR_TO]->(b)
-        MERGE (b)-[:SIMILAR_TO]->(a)
         """,
         source=SOURCE_VALUE,
     ).consume()
@@ -469,15 +434,23 @@ def _print_top_lists(session: Any) -> None:
 def main() -> int:
     _load_dotenv_if_available()
 
-    if not INPUT_CSV.exists():
-        raise FileNotFoundError(f"Input CSV not found: {INPUT_CSV}")
+    input_csv_env = os.getenv("TRIAGEFIX_GRAPH_INPUT_CSV", "").strip()
+    input_csv_path = Path(input_csv_env) if input_csv_env else DEFAULT_INPUT_CSV
+    if not input_csv_path.is_absolute():
+        input_csv_path = REPO_ROOT / input_csv_path
+    input_csv_path = input_csv_path.resolve()
+
+    if not input_csv_path.exists():
+        raise FileNotFoundError(f"Input CSV not found: {input_csv_path}")
 
     uri = _require_env("NEO4J_URI")
     username = _require_env("NEO4J_USERNAME")
     password = _require_env("NEO4J_PASSWORD")
     database = os.getenv("NEO4J_DATABASE", "neo4j").strip() or "neo4j"
 
-    with INPUT_CSV.open("r", encoding="utf-8", newline="") as f:
+    print(f"input CSV: {input_csv_path}")
+
+    with input_csv_path.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
 
     driver = GraphDatabase.driver(uri, auth=(username, password))
