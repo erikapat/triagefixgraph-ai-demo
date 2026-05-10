@@ -484,10 +484,14 @@ async def triagefix_incidents():
         """
         MATCH (i:Incident:TriageFixManaged {source: $source})
         OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
         OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
         OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
         OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+        OPTIONAL MATCH (p)-[:LOCATED_IN_AREA]->(a:AreaCluster)
+        OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
         OPTIONAL MATCH (i)-[:HANDLED_BY]->(r:Renovator)
+        OPTIONAL MATCH (i)-[:HAS_RESOLUTION_TIME_BAND]->(rtb:ResolutionTimeBand)
         OPTIONAL MATCH (i)-[:RECOMMENDED_ACTION]->(ra:RecommendedAction)
         OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
         RETURN
@@ -495,11 +499,15 @@ async def triagefix_incidents():
           i.created_date AS created_date,
           i.severity_average AS severity_average,
           c.name AS category,
+          sc.name AS subcategory,
           u.name AS urgency,
           s.name AS status,
           p.property_context_id AS property_context_id,
+          a.name AS area_cluster,
+          t.name AS trade_specialist,
           r.name AS renovator,
           r.name AS provider_candidate,
+          rtb.name AS resolution_time_band,
           ra.name AS recommended_action,
           coalesce(e.has_incidence_docs, false) AS has_incidence_docs,
           left(i.clean_description, 180) AS description_preview
@@ -732,7 +740,7 @@ async def triagefix_incident_decision_support(incident_id: str):
               AND date(older.created_date) < date(i.created_date)
             RETURN
               count(DISTINCT older) AS prior_count,
-              collect(DISTINCT oc.name) AS prior_categories,
+              [x IN collect(DISTINCT oc.name) WHERE x IS NOT NULL] AS prior_categories,
               max(older.created_date) AS latest_prior_incident_date
             """,
             {"source": source, "incident_id": incident_id, "property_context_id": property_context_id},

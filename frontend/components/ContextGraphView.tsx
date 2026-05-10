@@ -78,6 +78,18 @@ interface ContextGraphViewProps {
 
 const TECHNICAL_LABELS = new Set(["TriageFixManaged"]);
 const DEFAULT_INCIDENT_ID = "rec7i2cq4iVkb0eTy";
+const FILTERABLE_FIELDS = [
+  { key: "incident_id", label: "Incident" },
+  { key: "property_context_id", label: "PropertyContext" },
+  { key: "area_cluster", label: "AreaCluster" },
+  { key: "category", label: "Category" },
+  { key: "subcategory", label: "Subcategory" },
+  { key: "urgency", label: "Urgency" },
+  { key: "status", label: "Status" },
+  { key: "trade_specialist", label: "TradeSpecialist" },
+  { key: "renovator", label: "Renovator" },
+  { key: "resolution_time_band", label: "ResolutionTimeBand" },
+] as const;
 
 // ---------------------------------------------------------------------------
 // Helpers — convert backend serialized data to internal format
@@ -211,6 +223,8 @@ export function ContextGraphView({
   const [incidents, setIncidents] = useState<Record<string, unknown>[]>([]);
   const [incidentInput, setIncidentInput] = useState("");
   const [incidentContext, setIncidentContext] = useState<Record<string, unknown> | null>(null);
+  const [filterField, setFilterField] = useState<(typeof FILTERABLE_FIELDS)[number]["key"]>("incident_id");
+  const [filterValue, setFilterValue] = useState("");
   const [focusMode, setFocusMode] = useState<
     "decision_context" | "incident_links_only" | "missing_questions" | "severity_signals" | "all_context"
   >("decision_context");
@@ -241,6 +255,32 @@ export function ContextGraphView({
       loadIncidentContext(selectedIncidentId);
     }
   }, [selectedIncidentId]);
+
+  const availableFilterValues = useMemo(() => {
+    const values = new Set<string>();
+    for (const row of incidents) {
+      const raw = String(row[filterField] ?? "").trim();
+      if (raw) values.add(raw);
+    }
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [incidents, filterField]);
+
+  const filteredIncidents = useMemo(() => {
+    const needle = filterValue.trim().toLowerCase();
+    if (!needle) return incidents;
+    return incidents.filter((row) =>
+      String(row[filterField] ?? "").trim().toLowerCase().includes(needle)
+    );
+  }, [incidents, filterField, filterValue]);
+
+  useEffect(() => {
+    const firstFilteredId = String(filteredIncidents[0]?.incident_id ?? "").trim();
+    if (firstFilteredId) {
+      setIncidentInput(firstFilteredId);
+    } else {
+      setIncidentInput("");
+    }
+  }, [filteredIncidents]);
 
   async function loadIncidents() {
     setLoading(true);
@@ -643,8 +683,12 @@ export function ContextGraphView({
           <VStack align="stretch" gap={2}>
             <HStack gap={2}>
               <select
-                value={incidentInput}
-                onChange={(e) => setIncidentInput(e.currentTarget.value)}
+                value={filterField}
+                onChange={(e) => {
+                  const nextField = e.currentTarget.value as (typeof FILTERABLE_FIELDS)[number]["key"];
+                  setFilterField(nextField);
+                  setFilterValue("");
+                }}
                 style={{
                   flex: 1,
                   border: "1px solid #e2e8f0",
@@ -654,31 +698,39 @@ export function ContextGraphView({
                   background: "white",
                 }}
               >
-                <option value="">Select incident</option>
-                {incidents.map((item) => {
-                  const id = String(item.incident_id || "");
-                  return (
-                    <option key={id} value={id}>
-                      {id} | sev {String(item.severity_average ?? "—")} | {String(item.category ?? "—")}
-                    </option>
-                  );
-                })}
+                {FILTERABLE_FIELDS.map((field) => (
+                  <option key={field.key} value={field.key}>
+                    {field.label}
+                  </option>
+                ))}
               </select>
               <Input
                 size="sm"
-                value={incidentInput}
-                onChange={(e) => setIncidentInput(e.target.value)}
-                placeholder="incident_id"
-                maxW="260px"
+                value={filterValue}
+                onChange={(e) => setFilterValue(e.target.value)}
+                placeholder={`Type ${FILTERABLE_FIELDS.find((f) => f.key === filterField)?.label || "value"}...`}
+                list="triagefix-filter-values"
+                maxW="460px"
               />
+              <datalist id="triagefix-filter-values">
+                {availableFilterValues.map((value) => (
+                  <option key={value} value={value} />
+                ))}
+              </datalist>
               <Button
                 size="sm"
+                disabled={!incidentInput}
                 onClick={async () => {
                   await loadIncidentContext(incidentInput.trim());
                 }}
               >
                 Load
               </Button>
+            </HStack>
+            <HStack gap={2} flexWrap="wrap">
+              <Badge>Matches: {filteredIncidents.length}</Badge>
+              <Badge>Filter value: {filterValue || "(all)"}</Badge>
+              <Badge>Selected incident: {incidentInput || "none"}</Badge>
             </HStack>
             {incidentContext && (
               <HStack gap={2} flexWrap="wrap">
