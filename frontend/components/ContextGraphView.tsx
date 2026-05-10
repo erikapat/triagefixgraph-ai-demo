@@ -77,6 +77,7 @@ interface ContextGraphViewProps {
 }
 
 const TECHNICAL_LABELS = new Set(["TriageFixManaged"]);
+const DEFAULT_INCIDENT_ID = "rec7i2cq4iVkb0eTy";
 
 // ---------------------------------------------------------------------------
 // Helpers — convert backend serialized data to internal format
@@ -210,6 +211,9 @@ export function ContextGraphView({
   const [incidents, setIncidents] = useState<Record<string, unknown>[]>([]);
   const [incidentInput, setIncidentInput] = useState("");
   const [incidentContext, setIncidentContext] = useState<Record<string, unknown> | null>(null);
+  const [focusMode, setFocusMode] = useState<
+    "decision_context" | "incident_links_only" | "missing_questions" | "severity_signals" | "all_context"
+  >("decision_context");
 
   // Load incidents on mount
   useEffect(() => {
@@ -246,11 +250,14 @@ export function ContextGraphView({
       const data = await res.json();
       const rows = data.incidents || [];
       setIncidents(rows);
-      const firstId = rows[0]?.incident_id as string | undefined;
-      if (firstId) {
-        setIncidentInput(firstId);
-        onSelectedIncidentChange?.(firstId);
-        await loadIncidentContext(firstId);
+      const preferredId =
+        (rows.find((r: Record<string, unknown>) => String(r.incident_id || "") === DEFAULT_INCIDENT_ID)
+          ?.incident_id as string | undefined) ||
+        (rows[0]?.incident_id as string | undefined);
+      if (preferredId) {
+        setIncidentInput(preferredId);
+        onSelectedIncidentChange?.(preferredId);
+        await loadIncidentContext(preferredId);
       }
     } catch {
       setError("Unable to load incidents list. Is the backend running?");
@@ -279,6 +286,7 @@ export function ContextGraphView({
       setGraphData(parsed);
       setIsSchemaView(false);
       setExpandedNodeIds(new Set());
+      setFocusMode("decision_context");
       setSelectedElement(null);
       setSelectedNodeId(null);
       setSelectedRelId(null);
@@ -427,11 +435,93 @@ export function ContextGraphView({
     setSelectedRelId(null);
   }, []);
 
+  const filteredGraphData = useMemo((): InternalGraphData | null => {
+    if (!graphData) return null;
+    if (isSchemaView) return graphData;
+    if (focusMode === "all_context") return graphData;
+
+    const nodeById = new Map(graphData.nodes.map((n) => [n.id, n]));
+    const selectedIncidentNodeId =
+      graphData.nodes.find(
+        (n) =>
+          n.labels.includes("Incident") &&
+          String((n.properties.incident_id as string | undefined) ?? "") === (selectedIncidentId || ""),
+      )?.id ?? null;
+    if (!selectedIncidentNodeId) return graphData;
+
+    const keepNodeIds = new Set<string>([selectedIncidentNodeId]);
+    const keepRelIds = new Set<string>();
+
+    if (focusMode === "decision_context") {
+      const contextLabels = new Set([
+        "Incident",
+        "PropertyContext",
+        "AreaCluster",
+        "Category",
+        "Subcategory",
+        "Urgency",
+        "Status",
+        "RecommendedAction",
+        "TradeSpecialist",
+        "Renovator",
+        "Evidence",
+      ]);
+      for (const n of graphData.nodes) {
+        if (contextLabels.has(n.labels[0])) keepNodeIds.add(n.id);
+      }
+      for (const r of graphData.relationships) {
+        if ((r.type === "PRIOR_SIMILAR" || r.type === "SIMILAR_TO") &&
+            (r.startNodeId === selectedIncidentNodeId || r.endNodeId === selectedIncidentNodeId)) {
+          keepNodeIds.add(r.startNodeId);
+          keepNodeIds.add(r.endNodeId);
+          keepRelIds.add(r.id);
+        }
+      }
+      for (const r of graphData.relationships) {
+        if (keepNodeIds.has(r.startNodeId) && keepNodeIds.has(r.endNodeId)) keepRelIds.add(r.id);
+      }
+    } else if (focusMode === "incident_links_only") {
+      for (const r of graphData.relationships) {
+        if (r.type !== "PRIOR_SIMILAR" && r.type !== "SIMILAR_TO") continue;
+        const a = nodeById.get(r.startNodeId);
+        const b = nodeById.get(r.endNodeId);
+        if (!a || !b) continue;
+        if (!a.labels.includes("Incident") || !b.labels.includes("Incident")) continue;
+        keepNodeIds.add(a.id);
+        keepNodeIds.add(b.id);
+        keepRelIds.add(r.id);
+      }
+    } else if (focusMode === "missing_questions") {
+      for (const r of graphData.relationships) {
+        if (r.type !== "NEEDS_QUESTION") continue;
+        if (r.startNodeId !== selectedIncidentNodeId && r.endNodeId !== selectedIncidentNodeId) continue;
+        keepNodeIds.add(r.startNodeId);
+        keepNodeIds.add(r.endNodeId);
+        keepRelIds.add(r.id);
+      }
+    } else if (focusMode === "severity_signals") {
+      for (const r of graphData.relationships) {
+        if (r.type !== "HAS_SEVERITY_SIGNAL") continue;
+        if (r.startNodeId !== selectedIncidentNodeId && r.endNodeId !== selectedIncidentNodeId) continue;
+        keepNodeIds.add(r.startNodeId);
+        keepNodeIds.add(r.endNodeId);
+        keepRelIds.add(r.id);
+      }
+    }
+
+    return {
+      nodes: graphData.nodes.filter((n) => keepNodeIds.has(n.id)),
+      relationships: graphData.relationships.filter(
+        (r) => keepRelIds.has(r.id) && keepNodeIds.has(r.startNodeId) && keepNodeIds.has(r.endNodeId),
+      ),
+    };
+  }, [graphData, isSchemaView, focusMode, selectedIncidentId]);
+
   // Transform to NVL format
   const nvlData = useMemo(() => {
-    if (!graphData) return { nodes: [], relationships: [] };
+    if (!filteredGraphData) return { nodes: [], relationships: [] };
 
-    const nodes: NvlNode[] = graphData.nodes.map((node) => {
+    const nodes: NvlNode[] = filteredGraphData.nodes.map((node) => {
       const isSelected = selectedNodeId === node.id;
       const isSelectedIncident =
         !!selectedIncidentId &&
@@ -478,7 +568,7 @@ export function ContextGraphView({
       };
     });
 
-    const relationships: NvlRelationship[] = graphData.relationships.map((rel) => {
+    const relationships: NvlRelationship[] = filteredGraphData.relationships.map((rel) => {
       const isSelected = selectedRelId === rel.id;
       return {
         id: rel.id,
@@ -491,7 +581,7 @@ export function ContextGraphView({
     });
 
     return { nodes, relationships };
-  }, [graphData, selectedNodeId, selectedRelId, expandedNodeIds, isSchemaView, selectedIncidentId]);
+  }, [filteredGraphData, selectedNodeId, selectedRelId, expandedNodeIds, isSchemaView, selectedIncidentId]);
 
   // Empty / error states
   if (error) {
@@ -602,6 +692,23 @@ export function ContextGraphView({
                 <Badge>Prior Similar: {Array.isArray(incidentContext.prior_similar_incidents) ? incidentContext.prior_similar_incidents.length : 0}</Badge>
               </HStack>
             )}
+            <HStack gap={2} flexWrap="wrap">
+              <Button size="xs" variant={focusMode === "decision_context" ? "solid" : "outline"} onClick={() => setFocusMode("decision_context")}>
+                Decision context
+              </Button>
+              <Button size="xs" variant={focusMode === "incident_links_only" ? "solid" : "outline"} onClick={() => setFocusMode("incident_links_only")}>
+                Incident links only
+              </Button>
+              <Button size="xs" variant={focusMode === "missing_questions" ? "solid" : "outline"} onClick={() => setFocusMode("missing_questions")}>
+                Missing questions
+              </Button>
+              <Button size="xs" variant={focusMode === "severity_signals" ? "solid" : "outline"} onClick={() => setFocusMode("severity_signals")}>
+                Severity signals
+              </Button>
+              <Button size="xs" variant={focusMode === "all_context" ? "solid" : "outline"} onClick={() => setFocusMode("all_context")}>
+                All context
+              </Button>
+            </HStack>
           </VStack>
         </Box>
       )}
@@ -609,8 +716,8 @@ export function ContextGraphView({
       {/* Legend */}
       <Flex
         position="absolute"
-        top={isSchemaView ? "52px" : "140px"}
-        left={2}
+        bottom={2}
+        right={2}
         zIndex={10}
         bg="white"
         borderRadius="md"
@@ -618,7 +725,7 @@ export function ContextGraphView({
         gap={2}
         flexWrap="wrap"
         maxW="220px"
-        maxH="180px"
+        maxH="220px"
         overflowY="auto"
         css={{ "&::-webkit-scrollbar": { width: "4px" }, "&::-webkit-scrollbar-thumb": { background: "#CBD5E0", borderRadius: "4px" } }}
         boxShadow="sm"

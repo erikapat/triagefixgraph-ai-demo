@@ -221,10 +221,10 @@ export default function Home() {
               <Tabs.Trigger value="documents">Documents</Tabs.Trigger>
             </Tabs.List>
             <Tabs.Content value="traces" p={0} h="calc(100dvh - 110px)" overflow="auto">
-              <DecisionTracePanel />
+              <DecisionTracePanel selectedIncidentId={selectedIncidentId} />
             </Tabs.Content>
             <Tabs.Content value="documents" p={0} h="calc(100dvh - 110px)" overflow="auto">
-              <DocumentBrowser />
+              <DocumentBrowser selectedIncidentId={selectedIncidentId} />
             </Tabs.Content>
           </Tabs.Root>
         </Box>
