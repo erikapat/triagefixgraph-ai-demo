@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from agents import Agent, Runner, function_tool
 
@@ -216,10 +217,37 @@ agent = Agent(
     ],
 )
 
+INCIDENT_ID_RE = re.compile(r"\brec[a-zA-Z0-9]{8,}\b")
+THIS_INCIDENT_RE = re.compile(r"\b(this incident|este incidente)\b", re.IGNORECASE)
+
 
 async def handle_message(message: str, session_id: str | None = None) -> dict:
     """Handle an incoming chat message."""
     session_id = resolve_session_id(session_id)
+
+    if THIS_INCIDENT_RE.search(message) and not INCIDENT_ID_RE.search(message):
+        clarification = (
+            "I need an explicit incident id to explain a specific incident. "
+            "Please select an incident in the center panel or include an id like "
+            "`recRH51V2eHHlTh9W` in your message."
+        )
+        await store_message(session_id, "user", message)
+        await store_message(session_id, "assistant", clarification)
+        return {
+            "response": clarification,
+            "session_id": session_id,
+            "graph_data": None,
+            "entities_extracted": [],
+            "preferences_detected": [],
+        }
+
+    scoped_message = message
+    match = INCIDENT_ID_RE.search(message)
+    if match:
+        scoped_message = (
+            f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
+            f"{message}"
+        )
 
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)
@@ -231,10 +259,10 @@ async def handle_message(message: str, session_id: str | None = None) -> dict:
         )
         input_message = (
             f"<conversation_history>\n{history_block}\n</conversation_history>\n\n"
-            f"[USER]\n{message}"
+            f"[USER]\n{scoped_message}"
         )
     else:
-        input_message = message
+        input_message = scoped_message
 
     result = await Runner.run(agent, input_message)
 
@@ -257,6 +285,25 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
     session_id = resolve_session_id(session_id)
 
     collector = get_collector()
+
+    if THIS_INCIDENT_RE.search(message) and not INCIDENT_ID_RE.search(message):
+        clarification = (
+            "I need an explicit incident id to explain a specific incident. "
+            "Please select an incident in the center panel or include an id like "
+            "`recRH51V2eHHlTh9W` in your message."
+        )
+        collector.emit_text_delta(clarification)
+        collector.emit_done(clarification, session_id)
+        return {"response": clarification, "session_id": session_id, "graph_data": None}
+
+    scoped_message = message
+    match = INCIDENT_ID_RE.search(message)
+    if match:
+        scoped_message = (
+            f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
+            f"{message}"
+        )
+
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)
     history = context.get("messages", [])
@@ -267,10 +314,10 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
         )
         input_message = (
             f"<conversation_history>\n{history_block}\n</conversation_history>\n\n"
-            f"[USER]\n{message}"
+            f"[USER]\n{scoped_message}"
         )
     else:
-        input_message = message
+        input_message = scoped_message
 
     result = Runner.run_streamed(agent, input_message)
     response_text = ""

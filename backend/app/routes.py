@@ -473,3 +473,164 @@ async def triagefix_summary():
         "prior_similar_relationships": int(prior_similar_rows[0]["c"]) if prior_similar_rows else 0,
         "incidents_with_evidence": int(incidents_with_evidence_rows[0]["c"]) if incidents_with_evidence_rows else 0,
     }
+
+
+@router.get("/triagefix/incidents")
+async def triagefix_incidents():
+    """List incident selector rows from TriageFix managed graph."""
+    _require_neo4j()
+    source = "airtable_enriched_sample"
+    results = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source})
+        OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+        OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+        OPTIONAL MATCH (i)-[:HANDLED_BY]->(r:Renovator)
+        OPTIONAL MATCH (i)-[:RECOMMENDED_ACTION]->(ra:RecommendedAction)
+        OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
+        RETURN
+          i.incident_id AS incident_id,
+          i.created_date AS created_date,
+          i.severity_average AS severity_average,
+          c.name AS category,
+          u.name AS urgency,
+          s.name AS status,
+          p.property_context_id AS property_context_id,
+          r.name AS renovator,
+          r.name AS provider_candidate,
+          ra.name AS recommended_action,
+          coalesce(e.has_incidence_docs, false) AS has_incidence_docs,
+          left(i.clean_description, 180) AS description_preview
+        ORDER BY i.severity_average DESC, i.created_date DESC
+        """,
+        {"source": source},
+    )
+    return {"incidents": results}
+
+
+@router.get("/triagefix/incidents/{incident_id}/context")
+async def triagefix_incident_context(incident_id: str):
+    """Get local context and graph payload for one incident."""
+    _require_neo4j()
+    source = "airtable_enriched_sample"
+    context_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+        OPTIONAL MATCH (p)-[:LOCATED_IN_AREA]->(a:AreaCluster)
+        OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
+        OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+        OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (i)-[:RECOMMENDED_ACTION]->(ra:RecommendedAction)
+        OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
+        OPTIONAL MATCH (i)-[:HANDLED_BY]->(r:Renovator)
+        OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
+        OPTIONAL MATCH (i)-[:NEEDS_QUESTION]->(mq:MissingQuestion)
+        OPTIONAL MATCH (i)-[:HAS_SEVERITY_SIGNAL]->(ss:SeveritySignal)
+        OPTIONAL MATCH (prior:Incident:TriageFixManaged {source: $source})-[ps:PRIOR_SIMILAR]->(i)
+        RETURN
+          i.incident_id AS incident_id,
+          i.created_date AS created_date,
+          i.resolved_date AS resolved_date,
+          i.severity_average AS severity_average,
+          i.provider_confidence AS provider_confidence,
+          i.clean_description AS clean_description,
+          p.property_context_id AS property_context_id,
+          a.name AS area_cluster,
+          c.name AS category,
+          sc.name AS subcategory,
+          u.name AS urgency,
+          s.name AS status,
+          ra.name AS recommended_action,
+          t.name AS trade_specialist,
+          r.name AS renovator,
+          e.evidence_id AS evidence_id,
+          e.has_incidence_docs AS has_incidence_docs,
+          e.incidence_docs_count AS incidence_docs_count,
+          e.lease_contract_count AS lease_contract_count,
+          e.furniture_budget_count AS furniture_budget_count,
+          e.finance_invoice_count AS finance_invoice_count,
+          collect(DISTINCT mq.text) AS missing_questions,
+          collect(DISTINCT {dimension: ss.dimension, score: ss.score}) AS severity_signals,
+          collect(DISTINCT {
+            incident_id: prior.incident_id,
+            created_date: prior.created_date,
+            severity_average: prior.severity_average,
+            reason: ps.reason
+          }) AS prior_similar_incidents
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+    if not context_rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    graph_nodes = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        CALL (i) {
+          RETURN i AS n
+
+          UNION
+
+          MATCH (i)-[]-(n:TriageFixManaged {source: $source})
+          RETURN n
+
+          UNION
+
+          MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(:PropertyContext:TriageFixManaged {source: $source})-[:LOCATED_IN_AREA]->(n:AreaCluster:TriageFixManaged {source: $source})
+          RETURN n
+        }
+        WITH DISTINCT n
+        RETURN
+          elementId(n) AS id,
+          head([label IN labels(n) WHERE label <> 'TriageFixManaged']) AS label,
+          coalesce(
+            n.incident_id,
+            n.property_context_id,
+            n.name,
+            n.evidence_id,
+            n.case_id,
+            n.text,
+            elementId(n)
+          ) AS title,
+          properties(n) AS properties
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+
+    graph_edges = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        CALL (i) {
+          RETURN i AS n
+
+          UNION
+
+          MATCH (i)-[]-(n:TriageFixManaged {source: $source})
+          RETURN n
+
+          UNION
+
+          MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(:PropertyContext:TriageFixManaged {source: $source})-[:LOCATED_IN_AREA]->(n:AreaCluster:TriageFixManaged {source: $source})
+          RETURN n
+        }
+        WITH collect(DISTINCT elementId(n)) AS node_ids
+        MATCH (source:TriageFixManaged {source: $source})-[r]->(target:TriageFixManaged {source: $source})
+        WHERE elementId(source) IN node_ids
+          AND elementId(target) IN node_ids
+        RETURN DISTINCT
+          elementId(source) AS source,
+          elementId(target) AS target,
+          type(r) AS type,
+          properties(r) AS properties
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+    graph_payload = {"nodes": graph_nodes, "relationships": graph_edges}
+    return {
+        "context": context_rows[0],
+        "graph": graph_payload,
+    }

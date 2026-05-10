@@ -12,6 +12,7 @@ import {
   Heading,
   IconButton,
   Spinner,
+  Input,
 } from "@chakra-ui/react";
 import { X, RotateCcw } from "lucide-react";
 import {
@@ -70,6 +71,8 @@ interface SelectedElement {
 
 interface ContextGraphViewProps {
   externalGraphData?: GraphData | null;
+  selectedIncidentId?: string | null;
+  onSelectedIncidentChange?: (incidentId: string | null) => void;
   onAskAbout?: (entityName: string) => void;
 }
 
@@ -93,7 +96,7 @@ function extractNodesAndRels(results: Record<string, unknown>[]): InternalGraphD
 
     const v = value as Record<string, unknown>;
 
-    // Node: has labels array
+    // Node: Neo4j serialized node (labels + elementId)
     if (Array.isArray(v.labels) && v.elementId) {
       const id = String(v.elementId);
       if (!nodeMap.has(id)) {
@@ -110,16 +113,36 @@ function extractNodesAndRels(results: Record<string, unknown>[]): InternalGraphD
       return;
     }
 
-    // Relationship: has type and startNodeElementId
-    if (v.type && v.startNodeElementId) {
+    // Node: incident context scalar map (id + label + properties)
+    if (v.id && (v.label || v.properties)) {
+      const id = String(v.id);
+      if (!nodeMap.has(id)) {
+        const label = v.label ? String(v.label) : "Node";
+        const props = (v.properties && typeof v.properties === "object")
+          ? (v.properties as Record<string, unknown>)
+          : {};
+        nodeMap.set(id, {
+          id,
+          labels: [label],
+          properties: {
+            ...props,
+            title: v.title ?? props.title,
+          },
+        });
+      }
+      return;
+    }
+
+    // Relationship: Neo4j serialized or incident context scalar map
+    if (v.type && (v.startNodeElementId || (v.source && v.target))) {
       const id = String(v.elementId || v.id || Math.random());
       if (!relMap.has(id)) {
-        const { elementId, type, startNodeElementId, endNodeElementId, ...props } = v;
+        const { elementId, type, startNodeElementId, endNodeElementId, source, target, ...props } = v;
         relMap.set(id, {
           id,
           type: String(type),
-          startNodeId: String(startNodeElementId),
-          endNodeId: String(endNodeElementId),
+          startNodeId: String(startNodeElementId ?? source),
+          endNodeId: String(endNodeElementId ?? target),
           properties: props,
         });
       }
@@ -169,8 +192,13 @@ function getNodeSize(labels: string[]): number {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraphViewProps) {
-  const [isSchemaView, setIsSchemaView] = useState(true);
+export function ContextGraphView({
+  externalGraphData,
+  selectedIncidentId,
+  onSelectedIncidentChange,
+  onAskAbout,
+}: ContextGraphViewProps) {
+  const [isSchemaView, setIsSchemaView] = useState(false);
   const [loading, setLoading] = useState(false);
   const [isExpanding, setIsExpanding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -179,10 +207,13 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
   const [selectedRelId, setSelectedRelId] = useState<string | null>(null);
   const [expandedNodeIds, setExpandedNodeIds] = useState<Set<string>>(new Set());
   const [graphData, setGraphData] = useState<InternalGraphData | null>(null);
+  const [incidents, setIncidents] = useState<Record<string, unknown>[]>([]);
+  const [incidentInput, setIncidentInput] = useState("");
+  const [incidentContext, setIncidentContext] = useState<Record<string, unknown> | null>(null);
 
-  // Load schema on mount
+  // Load incidents on mount
   useEffect(() => {
-    loadSchema();
+    loadIncidents();
   }, []);
 
   // When external graph data arrives from chat, switch to data view
@@ -199,6 +230,64 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
       }
     }
   }, [externalGraphData]);
+
+  useEffect(() => {
+    if (selectedIncidentId && selectedIncidentId !== incidentInput) {
+      setIncidentInput(selectedIncidentId);
+      loadIncidentContext(selectedIncidentId);
+    }
+  }, [selectedIncidentId]);
+
+  async function loadIncidents() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/triagefix/incidents`, { signal: AbortSignal.timeout(10000) });
+      const data = await res.json();
+      const rows = data.incidents || [];
+      setIncidents(rows);
+      const firstId = rows[0]?.incident_id as string | undefined;
+      if (firstId) {
+        setIncidentInput(firstId);
+        onSelectedIncidentChange?.(firstId);
+        await loadIncidentContext(firstId);
+      }
+    } catch {
+      setError("Unable to load incidents list. Is the backend running?");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadIncidentContext(incidentId: string) {
+    if (!incidentId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/triagefix/incidents/${encodeURIComponent(incidentId)}/context`, {
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) throw new Error("incident not found");
+      const payload = await res.json();
+      setIncidentContext(payload.context || null);
+      onSelectedIncidentChange?.(incidentId);
+      const graph = payload.graph || {};
+      const nodes = graph.nodes ?? [];
+      const relationships = graph.relationships ?? graph.edges ?? [];
+      console.log("incident graph", nodes.length, relationships.length);
+      const parsed = extractNodesAndRels([{ nodes, relationships }]);
+      setGraphData(parsed);
+      setIsSchemaView(false);
+      setExpandedNodeIds(new Set());
+      setSelectedElement(null);
+      setSelectedNodeId(null);
+      setSelectedRelId(null);
+    } catch {
+      setError("Unable to load selected incident context.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function loadSchema() {
     setLoading(true);
@@ -344,6 +433,10 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
 
     const nodes: NvlNode[] = graphData.nodes.map((node) => {
       const isSelected = selectedNodeId === node.id;
+      const isSelectedIncident =
+        !!selectedIncidentId &&
+        node.labels.includes("Incident") &&
+        String((node.properties.incident_id as string | undefined) ?? "") === selectedIncidentId;
       const isExpanded = expandedNodeIds.has(node.id);
       const isSchema = isSchemaView;
 
@@ -369,6 +462,8 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
         title: tooltip,
         color: isSelected
           ? "#E53E3E"
+          : isSelectedIncident
+            ? "#C53030"
           : isExpanded
             ? "#38A169"
             : getNodeColor(node.labels),
@@ -376,6 +471,8 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
           ? SCHEMA_NODE_SIZE
           : isSelected
             ? getNodeSize(node.labels) * 1.3
+            : isSelectedIncident
+              ? getNodeSize(node.labels) * 1.35
             : getNodeSize(node.labels),
         selected: isSelected,
       };
@@ -394,7 +491,7 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
     });
 
     return { nodes, relationships };
-  }, [graphData, selectedNodeId, selectedRelId, expandedNodeIds, isSchemaView]);
+  }, [graphData, selectedNodeId, selectedRelId, expandedNodeIds, isSchemaView, selectedIncidentId]);
 
   // Empty / error states
   if (error) {
@@ -427,25 +524,92 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
           <Text fontSize="xs" color="gray.500">
             {isSchemaView
               ? "Schema view — double-click a label to explore"
-              : "TriageFix incident relationships"}
+              : "Incident view — local context for selected incident"}
           </Text>
         </Box>
-        {!isSchemaView && (
-          <IconButton
-            aria-label="Back to schema"
+        <HStack gap={2}>
+          <Button
             size="xs"
-            variant="ghost"
+            variant={isSchemaView ? "outline" : "solid"}
+            onClick={() => setIsSchemaView(false)}
+          >
+            Incident view
+          </Button>
+          <Button
+            size="xs"
+            variant={isSchemaView ? "solid" : "outline"}
             onClick={loadSchema}
           >
+            Schema view
+          </Button>
+          <IconButton aria-label="Reload incidents" size="xs" variant="ghost" onClick={loadIncidents}>
             <RotateCcw size={14} />
           </IconButton>
-        )}
+        </HStack>
       </Flex>
+
+      {!isSchemaView && (
+        <Box position="absolute" top="52px" left={2} right={2} zIndex={10} bg="white" borderWidth="1px" borderColor="gray.200" borderRadius="md" p={2} boxShadow="sm">
+          <VStack align="stretch" gap={2}>
+            <HStack gap={2}>
+              <select
+                value={incidentInput}
+                onChange={(e) => setIncidentInput(e.currentTarget.value)}
+                style={{
+                  flex: 1,
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "0.375rem",
+                  padding: "0.25rem 0.5rem",
+                  minHeight: "32px",
+                  background: "white",
+                }}
+              >
+                <option value="">Select incident</option>
+                {incidents.map((item) => {
+                  const id = String(item.incident_id || "");
+                  return (
+                    <option key={id} value={id}>
+                      {id} | sev {String(item.severity_average ?? "—")} | {String(item.category ?? "—")}
+                    </option>
+                  );
+                })}
+              </select>
+              <Input
+                size="sm"
+                value={incidentInput}
+                onChange={(e) => setIncidentInput(e.target.value)}
+                placeholder="incident_id"
+                maxW="260px"
+              />
+              <Button
+                size="sm"
+                onClick={async () => {
+                  await loadIncidentContext(incidentInput.trim());
+                }}
+              >
+                Load
+              </Button>
+            </HStack>
+            {incidentContext && (
+              <HStack gap={2} flexWrap="wrap">
+                <Badge>Severity: {String(incidentContext.severity_average ?? "—")}</Badge>
+                <Badge>Category: {String(incidentContext.category ?? "—")}</Badge>
+                <Badge>Urgency: {String(incidentContext.urgency ?? "—")}</Badge>
+                <Badge>Action: {String(incidentContext.recommended_action ?? "—")}</Badge>
+                <Badge>Provider: {String(incidentContext.renovator ?? "—")}</Badge>
+                <Badge>Docs: {String(incidentContext.has_incidence_docs ?? false)}</Badge>
+                <Badge>Missing Q: {Array.isArray(incidentContext.missing_questions) ? incidentContext.missing_questions.length : 0}</Badge>
+                <Badge>Prior Similar: {Array.isArray(incidentContext.prior_similar_incidents) ? incidentContext.prior_similar_incidents.length : 0}</Badge>
+              </HStack>
+            )}
+          </VStack>
+        </Box>
+      )}
 
       {/* Legend */}
       <Flex
         position="absolute"
-        top="52px"
+        top={isSchemaView ? "52px" : "140px"}
         left={2}
         zIndex={10}
         bg="white"
@@ -477,7 +641,7 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
       {selectedElement && (
         <Box
           position="absolute"
-          top="52px"
+          top={isSchemaView ? "52px" : "140px"}
           right={2}
           zIndex={10}
           bg="white"
@@ -523,7 +687,7 @@ export function ContextGraphView({ externalGraphData, onAskAbout }: ContextGraph
                   </Badge>
                 ))}
               </HStack>
-              {onAskAbout && (selectedElement.data as GraphNode).properties.name && (
+              {onAskAbout && typeof (selectedElement.data as GraphNode).properties.name === "string" && (
                 <Button
                   size="xs"
                   colorPalette="blue"

@@ -8,7 +8,7 @@ import {
 import { Send, RotateCcw, ChevronDown, Wrench, Check, Bot, User, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { API_BASE, DEMO_SCENARIOS, DOMAIN } from "@/lib/config";
+import { API_BASE, DOMAIN } from "@/lib/config";
 import type { GraphData } from "@/lib/config";
 
 interface ToolCall {
@@ -43,6 +43,7 @@ interface Message {
 
 interface ChatInterfaceProps {
   onGraphUpdate?: (data: GraphData) => void;
+  selectedIncidentId?: string | null;
   externalInput?: string | null;
   onExternalInputConsumed?: () => void;
 }
@@ -133,7 +134,7 @@ function loadStoredSessionId(): string | null {
   }
 }
 
-export function ChatInterface({ onGraphUpdate, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
+export function ChatInterface({ onGraphUpdate, selectedIncidentId, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -424,8 +425,22 @@ export function ChatInterface({ onGraphUpdate, externalInput, onExternalInputCon
     }
   }
 
-  // Collect all prompts for suggested questions display
-  const allPrompts = DEMO_SCENARIOS.flatMap((s) => s.prompts);
+  const incidentPrompts = selectedIncidentId
+    ? [
+        `Explain incident ${selectedIncidentId} using graph context`,
+        `Why is the severity score assigned for incident ${selectedIncidentId}?`,
+        `What information is missing for incident ${selectedIncidentId}?`,
+        `Why this provider or trade for incident ${selectedIncidentId}?`,
+        `Show prior similar incidents for incident ${selectedIncidentId}`,
+        `What should the property manager do next for incident ${selectedIncidentId}?`,
+      ]
+    : [
+        "Show highest severity incidents",
+        "Show incidents with prior similar cases",
+        "Show evidence coverage",
+        "Show renovator workload by category",
+      ];
+  const allPrompts = incidentPrompts;
 
   return (
     <Flex direction="column" h="100%">
@@ -448,7 +463,7 @@ export function ChatInterface({ onGraphUpdate, externalInput, onExternalInputCon
             </Text>
             <HStack gap={1} flexShrink={0} color="gray.500" fontSize="xs" fontWeight="medium">
               <Sparkles size={14} />
-              <Text>Try these</Text>
+              <Text>{selectedIncidentId ? "Try these for selected incident" : "Try these"}</Text>
             </HStack>
             <Flex gap={2} flexWrap="wrap" justify="center" maxW="500px">
               {allPrompts.map((prompt, i) => (

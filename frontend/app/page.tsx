@@ -62,6 +62,7 @@ function ResizeHandle({ onDrag }: { onDrag: (delta: number) => void }) {
 
 export default function Home() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
   const [activePanel, setActivePanel] = useState<PanelId>("chat");
   const [backendStatus, setBackendStatus] = useState<"ok" | "degraded" | "offline">("offline");
   const [leftWidth, setLeftWidth] = useState(400);
@@ -176,6 +177,7 @@ export default function Home() {
         >
           <ChatInterface
               onGraphUpdate={handleGraphUpdate}
+              selectedIncidentId={selectedIncidentId}
               externalInput={askAboutInput}
               onExternalInputConsumed={() => setAskAboutInput(null)}
             />
@@ -192,7 +194,12 @@ export default function Home() {
           display={{ base: activePanel === "graph" ? "block" : "none", lg: "block" }}
         >
           <ErrorBoundary fallbackMessage="Graph visualization error">
-            <ContextGraphView externalGraphData={graphData} onAskAbout={handleAskAbout} />
+            <ContextGraphView
+              externalGraphData={graphData}
+              selectedIncidentId={selectedIncidentId}
+              onSelectedIncidentChange={setSelectedIncidentId}
+              onAskAbout={handleAskAbout}
+            />
           </ErrorBoundary>
         </Box>
 
