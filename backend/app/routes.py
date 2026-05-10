@@ -634,3 +634,231 @@ async def triagefix_incident_context(incident_id: str):
         "context": context_rows[0],
         "graph": graph_payload,
     }
+
+
+@router.get("/triagefix/incidents/{incident_id}/decision-support")
+async def triagefix_incident_decision_support(incident_id: str):
+    """Get selected-incident operational decision support for the right panel."""
+    _require_neo4j()
+    source = "airtable_enriched_sample"
+
+    incident_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
+        OPTIONAL MATCH (p)-[:LOCATED_IN_AREA]->(a:AreaCluster)
+        OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
+        OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+        OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (i)-[:RECOMMENDED_ACTION]->(ra:RecommendedAction)
+        OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
+        OPTIONAL MATCH (i)-[:HANDLED_BY]->(r:Renovator)
+        OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
+        RETURN
+          i.incident_id AS incident_id,
+          i.created_date AS created_date,
+          i.severity_average AS severity_average,
+          i.provider_confidence AS provider_confidence,
+          i.clean_description AS clean_description,
+          p.property_context_id AS property_context_id,
+          a.name AS area_cluster,
+          c.name AS category,
+          sc.name AS subcategory,
+          u.name AS urgency,
+          s.name AS status,
+          ra.name AS recommended_action,
+          t.name AS recommended_trade,
+          r.name AS provider,
+          e.has_incidence_docs AS has_incidence_docs,
+          e.incidence_docs_count AS incidence_docs_count,
+          e.lease_contract_count AS lease_contract_count,
+          e.furniture_budget_count AS furniture_budget_count,
+          e.finance_invoice_count AS finance_invoice_count
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+    if not incident_rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    incident = incident_rows[0]
+    property_context_id = incident.get("property_context_id")
+
+    severity_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        OPTIONAL MATCH (i)-[:HAS_SEVERITY_SIGNAL]->(ss:SeveritySignal)
+        RETURN ss.dimension AS dimension, ss.score AS score
+        ORDER BY ss.dimension ASC
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+    severity_signals = [
+        {"dimension": row["dimension"], "score": row["score"]}
+        for row in severity_rows
+        if row.get("dimension")
+    ]
+
+    missing_questions_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+        OPTIONAL MATCH (i)-[:NEEDS_QUESTION]->(mq:MissingQuestion)
+        RETURN collect(DISTINCT mq.text) AS questions
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+    missing_questions = (
+        [q for q in (missing_questions_rows[0].get("questions") or []) if q]
+        if missing_questions_rows
+        else []
+    )
+
+    prior_summary = {
+        "prior_same_property_count": 0,
+        "prior_same_property_categories": [],
+        "latest_prior_incident_date": None,
+    }
+    prior_same_property_rows: list[dict] = []
+    if property_context_id:
+        prior_counts = await execute_cypher(
+            """
+            MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+            MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext {property_context_id: $property_context_id})
+            MATCH (older:Incident:TriageFixManaged {source: $source})-[:HAS_PROPERTY_CONTEXT]->(p)
+            OPTIONAL MATCH (older)-[:HAS_CATEGORY]->(oc:Category)
+            WHERE older.incident_id <> i.incident_id
+              AND older.created_date IS NOT NULL
+              AND i.created_date IS NOT NULL
+              AND date(older.created_date) < date(i.created_date)
+            RETURN
+              count(DISTINCT older) AS prior_count,
+              collect(DISTINCT oc.name) AS prior_categories,
+              max(older.created_date) AS latest_prior_incident_date
+            """,
+            {"source": source, "incident_id": incident_id, "property_context_id": property_context_id},
+        )
+        if prior_counts:
+            prior_summary = {
+                "prior_same_property_count": int(prior_counts[0].get("prior_count") or 0),
+                "prior_same_property_categories": sorted(
+                    [x for x in (prior_counts[0].get("prior_categories") or []) if x]
+                ),
+                "latest_prior_incident_date": prior_counts[0].get("latest_prior_incident_date"),
+            }
+
+        prior_same_property_rows = await execute_cypher(
+            """
+            MATCH (older:Incident:TriageFixManaged {source: $source})-[r:PRIOR_SIMILAR {reason: 'same_property'}]->(i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+            OPTIONAL MATCH (older)-[:HAS_CATEGORY]->(c:Category)
+            OPTIONAL MATCH (older)-[:HAS_STATUS]->(s:Status)
+            RETURN
+              older.incident_id AS incident_id,
+              older.created_date AS created_date,
+              c.name AS category,
+              s.name AS status,
+              older.severity_average AS severity_average,
+              r.reason AS reason
+            ORDER BY older.created_date DESC
+            LIMIT 10
+            """,
+            {"source": source, "incident_id": incident_id},
+        )
+
+    semantic_similar_rows = await execute_cypher(
+        """
+        MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})-[r:SIMILAR_TO {reason: 'embedding_description_similarity'}]->(j:Incident:TriageFixManaged {source: $source})
+        OPTIONAL MATCH (j)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (j)-[:HAS_CATEGORY]->(c:Category)
+        WHERE toLower(coalesce(s.name, '')) IN ['resolved', 'resolved - partner']
+        RETURN
+          j.incident_id AS incident_id,
+          j.created_date AS created_date,
+          c.name AS category,
+          s.name AS status,
+          j.severity_average AS severity_average,
+          r.similarity_score AS similarity_score
+        ORDER BY r.similarity_score DESC, j.created_date DESC
+        LIMIT 10
+        """,
+        {"source": source, "incident_id": incident_id},
+    )
+
+    evidence_items = []
+    if int(incident.get("incidence_docs_count") or 0) > 0:
+        evidence_items.append({"type": "Incidence docs", "count": int(incident.get("incidence_docs_count") or 0)})
+    if int(incident.get("lease_contract_count") or 0) > 0:
+        evidence_items.append({"type": "Lease Contract", "count": int(incident.get("lease_contract_count") or 0)})
+    if int(incident.get("finance_invoice_count") or 0) > 0:
+        evidence_items.append({"type": "Finance Invoice", "count": int(incident.get("finance_invoice_count") or 0)})
+    if int(incident.get("furniture_budget_count") or 0) > 0:
+        evidence_items.append({"type": "Furniture budget doc", "count": int(incident.get("furniture_budget_count") or 0)})
+
+    if missing_questions:
+        next_action = "Collect missing questions and update routing decision."
+    elif incident.get("provider"):
+        next_action = f"Confirm assignment with provider {incident.get('provider')}."
+    else:
+        next_action = "Assign recommended trade specialist and confirm provider availability."
+
+    recommendation_summary = {
+        "recommended_action": incident.get("recommended_action"),
+        "recommended_trade": incident.get("recommended_trade"),
+        "provider": incident.get("provider"),
+        "provider_confidence": incident.get("provider_confidence"),
+        "severity_average": incident.get("severity_average"),
+        "next_action": next_action,
+    }
+
+    property_info = {
+        "property_context_id": property_context_id,
+        "area_cluster": incident.get("area_cluster"),
+        **prior_summary,
+    }
+
+    evidence = {
+        "has_incidence_docs": bool(incident.get("has_incidence_docs")),
+        "incidence_docs_count": int(incident.get("incidence_docs_count") or 0),
+        "lease_contract_count": int(incident.get("lease_contract_count") or 0),
+        "finance_invoice_count": int(incident.get("finance_invoice_count") or 0),
+        "items": evidence_items,
+    }
+
+    decision_trace = [
+        {
+            "step_number": 1,
+            "title": "Classify incident",
+            "observation": f"Category={incident.get('category') or 'unknown'}, subcategory={incident.get('subcategory') or 'unknown'}, urgency={incident.get('urgency') or 'unknown'}, status={incident.get('status') or 'unknown'}.",
+            "source": "category/severity graph",
+        },
+        {
+            "step_number": 2,
+            "title": "Check property history",
+            "observation": f"PropertyContext={property_context_id or 'unknown'} has {prior_summary['prior_same_property_count']} prior incidents; latest prior date={prior_summary['latest_prior_incident_date'] or 'unknown'}.",
+            "source": "PRIOR_SIMILAR",
+        },
+        {
+            "step_number": 3,
+            "title": "Find semantically similar resolved cases",
+            "observation": f"Found {len(semantic_similar_rows)} semantic similar resolved cases using clean_description.",
+            "source": "SIMILAR_TO embeddings",
+        },
+        {
+            "step_number": 4,
+            "title": "Recommend next action",
+            "observation": f"Action={incident.get('recommended_action') or 'unknown'}, trade={incident.get('recommended_trade') or 'unknown'}, provider={incident.get('provider') or 'not assigned'}, confidence={incident.get('provider_confidence') or 'unknown'}.",
+            "source": "recommended_action/provider routing",
+        },
+    ]
+
+    return {
+        "incident_id": incident_id,
+        "recommendation_summary": recommendation_summary,
+        "property_info": property_info,
+        "evidence": evidence,
+        "severity_signals": severity_signals,
+        "similar_cases": {
+            "prior_same_property": prior_same_property_rows,
+            "semantic_similar_resolved": semantic_similar_rows,
+        },
+        "decision_trace": decision_trace,
+    }
