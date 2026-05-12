@@ -733,15 +733,23 @@ async def triagefix_incident_decision_support(incident_id: str):
             MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
             MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext {property_context_id: $property_context_id})
             MATCH (older:Incident:TriageFixManaged {source: $source})-[:HAS_PROPERTY_CONTEXT]->(p)
-            OPTIONAL MATCH (older)-[:HAS_CATEGORY]->(oc:Category)
             WHERE older.incident_id <> i.incident_id
               AND older.created_date IS NOT NULL
               AND i.created_date IS NOT NULL
               AND date(older.created_date) < date(i.created_date)
+            WITH collect(DISTINCT older) AS priors, max(older.created_date) AS latest_prior_incident_date
+            CALL {
+              WITH priors
+              UNWIND priors AS o
+              OPTIONAL MATCH (o)-[:HAS_CATEGORY]->(oc:Category)
+              WITH DISTINCT oc.name AS category
+              WHERE category IS NOT NULL
+              RETURN collect(category) AS prior_categories
+            }
             RETURN
-              count(DISTINCT older) AS prior_count,
-              [x IN collect(DISTINCT oc.name) WHERE x IS NOT NULL] AS prior_categories,
-              max(older.created_date) AS latest_prior_incident_date
+              size(priors) AS prior_count,
+              prior_categories,
+              latest_prior_incident_date
             """,
             {"source": source, "incident_id": incident_id, "property_context_id": property_context_id},
         )

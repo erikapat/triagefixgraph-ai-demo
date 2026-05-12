@@ -32,9 +32,29 @@ only after tool results are available.
 SCOPE RULES:
 - If the user asks about a specific incident (explicit incident_id or "this incident"), use incident-scoped tools.
 - If the user asks a global analysis question (e.g., trends, communities, pending vs resolved patterns),
-  query across the full TriageFixManaged graph and do NOT restrict to the currently visualized incident subgraph."""
+  query across the full TriageFixManaged graph and do NOT restrict to the currently visualized incident subgraph.
+
+GRAPH RENDERING RULE:
+- If user asks to draw/visualize/show a graph, prioritize draw_* tools that return nodes/relationships for visualization.
+- Do not answer draw requests with only tabular rows when a draw_* tool is available."""
 
 GRAPH_SOURCE = settings.triagefix_graph_source
+
+PENDING_STATUSES = [
+    "follow up",
+    "pending - partner",
+    "action required",
+    "pending to evaluate",
+    "unknown",
+    "pending",
+    "follow-up",
+    "to evaluate",
+]
+RESOLVED_STATUSES = [
+    "resolved",
+    "resolved - partner",
+    "resolution",
+]
 
 
 @function_tool
@@ -177,14 +197,35 @@ async def get_evidence_coverage() -> str:
     cypher = """
     MATCH (i:Incident:TriageFixManaged {source: $source})
     OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
-    RETURN count(i) AS total_incidents,
-           count(DISTINCT CASE WHEN e IS NOT NULL THEN i END) AS incidents_with_evidence,
-           round(100.0 * count(DISTINCT CASE WHEN e IS NOT NULL THEN i END) / count(i), 2) AS evidence_coverage_pct,
-           count(DISTINCT CASE WHEN e.has_incidence_docs THEN i END) AS incidents_with_incidence_docs,
-           sum(coalesce(e.incidence_docs_count, 0)) AS total_incidence_docs,
-           sum(coalesce(e.lease_contract_count, 0)) AS total_lease_contract_docs,
-           sum(coalesce(e.furniture_budget_count, 0)) AS total_furniture_budget_docs,
-           sum(coalesce(e.finance_invoice_count, 0)) AS total_finance_invoice_docs
+    WITH i, e
+    WITH
+      count(DISTINCT i) AS total_incidents,
+      collect(DISTINCT CASE WHEN e IS NOT NULL THEN i END) AS evidence_incidents,
+      collect(DISTINCT CASE WHEN coalesce(e.has_incidence_docs, false) THEN i END) AS incidence_docs_incidents,
+      sum(coalesce(e.incidence_docs_count, 0)) AS total_incidence_docs,
+      sum(coalesce(e.lease_contract_count, 0)) AS total_lease_contract_docs,
+      sum(coalesce(e.furniture_budget_count, 0)) AS total_furniture_budget_docs,
+      sum(coalesce(e.finance_invoice_count, 0)) AS total_finance_invoice_docs
+    WITH
+      total_incidents,
+      size([x IN evidence_incidents WHERE x IS NOT NULL]) AS incidents_with_evidence,
+      size([x IN incidence_docs_incidents WHERE x IS NOT NULL]) AS incidents_with_incidence_docs,
+      total_incidence_docs,
+      total_lease_contract_docs,
+      total_furniture_budget_docs,
+      total_finance_invoice_docs
+    RETURN
+      total_incidents,
+      incidents_with_evidence,
+      CASE
+        WHEN total_incidents = 0 THEN 0.0
+        ELSE round(100.0 * incidents_with_evidence / toFloat(total_incidents), 2)
+      END AS evidence_coverage_pct,
+      incidents_with_incidence_docs,
+      total_incidence_docs,
+      total_lease_contract_docs,
+      total_furniture_budget_docs,
+      total_finance_invoice_docs
     """
     result = await execute_cypher(cypher, {"source": GRAPH_SOURCE}, tool_name="get_evidence_coverage")
     return json.dumps(result, default=str)
@@ -211,6 +252,111 @@ async def get_graph_schema() -> str:
     return json.dumps({"labels": labels, "relationship_types": rels}, default=str)
 
 
+@function_tool
+async def draw_incident_local_graph(incident_id: str) -> str:
+    """Return local subgraph (nodes/relationships) around one incident for visualization."""
+    cypher = """
+    MATCH (i:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})
+    OPTIONAL MATCH (i)-[r1]-(n1:TriageFixManaged {source: $source})
+    OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(:PropertyContext:TriageFixManaged {source: $source})-[r2:LOCATED_IN_AREA]->(a:AreaCluster:TriageFixManaged {source: $source})
+    WITH
+      [x IN (collect(DISTINCT i) + collect(DISTINCT n1) + collect(DISTINCT a)) WHERE x IS NOT NULL] AS nodes,
+      [x IN (collect(DISTINCT r1) + collect(DISTINCT r2)) WHERE x IS NOT NULL] AS relationships
+    RETURN nodes, relationships
+    """
+    result = await execute_cypher(
+        cypher,
+        {"incident_id": incident_id, "source": GRAPH_SOURCE},
+        tool_name="draw_incident_local_graph",
+    )
+    return json.dumps(result, default=str)
+
+
+@function_tool
+async def draw_pending_to_resolved_similar_graph(pair_limit: str = "60") -> str:
+    """Return global graph of pending incidents connected to resolved similar incidents."""
+    cypher = """
+    MATCH (src:Incident:TriageFixManaged {source: $source})-[:HAS_STATUS]->(src_status:Status)
+    MATCH (src)-[sim:SIMILAR_TO]-(tgt:Incident:TriageFixManaged {source: $source})
+    MATCH (tgt)-[:HAS_STATUS]->(tgt_status:Status)
+    WHERE toLower(coalesce(src_status.name, '')) IN $pending_statuses
+      AND toLower(coalesce(tgt_status.name, '')) IN $resolved_statuses
+      AND src.incident_id <> tgt.incident_id
+    WITH src, sim, tgt
+    ORDER BY src.severity_average DESC, coalesce(sim.similarity_score, 0.0) DESC
+    LIMIT toInteger($pair_limit)
+
+    OPTIONAL MATCH (src)-[:HAS_CATEGORY]->(src_cat:Category)
+    OPTIONAL MATCH (src)-[:HAS_URGENCY]->(src_urg:Urgency)
+    OPTIONAL MATCH (src)-[:HAS_PROPERTY_CONTEXT]->(src_prop:PropertyContext)
+    OPTIONAL MATCH (tgt)-[:HAS_CATEGORY]->(tgt_cat:Category)
+    OPTIONAL MATCH (tgt)-[:HANDLED_BY]->(tgt_ren:Renovator)
+
+    WITH
+      [x IN (
+        collect(DISTINCT src) + collect(DISTINCT tgt) +
+        collect(DISTINCT src_cat) + collect(DISTINCT src_urg) + collect(DISTINCT src_prop) +
+        collect(DISTINCT tgt_cat) + collect(DISTINCT tgt_ren)
+      ) WHERE x IS NOT NULL] AS nodes,
+      collect(DISTINCT sim) AS sim_relationships
+
+    UNWIND nodes AS n1
+    UNWIND nodes AS n2
+    OPTIONAL MATCH (n1)-[r]->(n2)
+    WITH nodes, sim_relationships, collect(DISTINCT r) AS context_relationships
+
+    WITH nodes, [x IN (sim_relationships + context_relationships) WHERE x IS NOT NULL] AS relationships
+    RETURN nodes, relationships
+    """
+    result = await execute_cypher(
+        cypher,
+        {
+            "source": GRAPH_SOURCE,
+            "pair_limit": pair_limit,
+            "pending_statuses": PENDING_STATUSES,
+            "resolved_statuses": RESOLVED_STATUSES,
+        },
+        tool_name="draw_pending_to_resolved_similar_graph",
+    )
+    return json.dumps(result, default=str)
+
+
+@function_tool
+async def draw_property_timeline_graph(incident_id: str = "", property_context_id: str = "") -> str:
+    """Return property timeline graph for one property context (incidents + PRIOR_SIMILAR chain)."""
+    if property_context_id.strip():
+        cypher = """
+        MATCH (p:PropertyContext:TriageFixManaged {source: $source, property_context_id: $property_context_id})
+        MATCH (p)<-[:HAS_PROPERTY_CONTEXT]-(i:Incident:TriageFixManaged {source: $source})
+        OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+        OPTIONAL MATCH (i)-[ps:PRIOR_SIMILAR]->(j:Incident:TriageFixManaged {source: $source})-[:HAS_PROPERTY_CONTEXT]->(p)
+        WITH
+          [x IN (collect(DISTINCT p) + collect(DISTINCT i) + collect(DISTINCT j) + collect(DISTINCT c) + collect(DISTINCT s) + collect(DISTINCT u)) WHERE x IS NOT NULL] AS nodes,
+          collect(DISTINCT ps) AS relationships
+        RETURN nodes, [x IN relationships WHERE x IS NOT NULL] AS relationships
+        """
+        params = {"source": GRAPH_SOURCE, "property_context_id": property_context_id}
+    else:
+        cypher = """
+        MATCH (base:Incident:TriageFixManaged {source: $source, incident_id: $incident_id})-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext:TriageFixManaged {source: $source})
+        MATCH (p)<-[:HAS_PROPERTY_CONTEXT]-(i:Incident:TriageFixManaged {source: $source})
+        OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
+        OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
+        OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
+        OPTIONAL MATCH (i)-[ps:PRIOR_SIMILAR]->(j:Incident:TriageFixManaged {source: $source})-[:HAS_PROPERTY_CONTEXT]->(p)
+        WITH
+          [x IN (collect(DISTINCT p) + collect(DISTINCT base) + collect(DISTINCT i) + collect(DISTINCT j) + collect(DISTINCT c) + collect(DISTINCT s) + collect(DISTINCT u)) WHERE x IS NOT NULL] AS nodes,
+          collect(DISTINCT ps) AS relationships
+        RETURN nodes, [x IN relationships WHERE x IS NOT NULL] AS relationships
+        """
+        params = {"source": GRAPH_SOURCE, "incident_id": incident_id}
+
+    result = await execute_cypher(cypher, params, tool_name="draw_property_timeline_graph")
+    return json.dumps(result, default=str)
+
+
 agent = Agent(
     name="TriageFixGraph Assistant",
     instructions=SYSTEM_PROMPT,
@@ -222,6 +368,9 @@ agent = Agent(
         get_missing_questions_by_category,
         get_evidence_coverage,
         get_graph_schema,
+        draw_incident_local_graph,
+        draw_pending_to_resolved_similar_graph,
+        draw_property_timeline_graph,
     ],
 )
 
@@ -231,6 +380,7 @@ GLOBAL_SCOPE_HINT_RE = re.compile(
     r"\b(show|visualize|anal(y|i)ze|community|communities|global|across|all incidents|pendientes|resolved|resuelt[oa]s)\b",
     re.IGNORECASE,
 )
+DRAW_INTENT_RE = re.compile(r"\b(draw|visualize|graph|grafo|dibuja|visualiza|mostrar grafo|show graph)\b", re.IGNORECASE)
 
 
 def _scope_prefix_for_message(message: str) -> str:
@@ -244,6 +394,15 @@ def _scope_prefix_for_message(message: str) -> str:
             f"for source={GRAPH_SOURCE}; do not limit to one incident unless asked."
         )
     return "SCOPE: global_scope unless the user explicitly asks for one incident."
+
+
+def _intent_prefix_for_message(message: str) -> str:
+    if DRAW_INTENT_RE.search(message):
+        return (
+            "INTENT: draw_graph. Prefer draw_* tools that return nodes/relationships. "
+            "Do not rely only on tabular tools."
+        )
+    return "INTENT: analysis_text."
 
 
 async def handle_message(message: str, session_id: str | None = None) -> dict:
@@ -273,7 +432,11 @@ async def handle_message(message: str, session_id: str | None = None) -> dict:
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
-    scoped_message = f"{_scope_prefix_for_message(message)}\n\n{scoped_message}"
+    scoped_message = (
+        f"{_scope_prefix_for_message(message)}\n"
+        f"{_intent_prefix_for_message(message)}\n\n"
+        f"{scoped_message}"
+    )
 
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)
@@ -329,7 +492,11 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
-    scoped_message = f"{_scope_prefix_for_message(message)}\n\n{scoped_message}"
+    scoped_message = (
+        f"{_scope_prefix_for_message(message)}\n"
+        f"{_intent_prefix_for_message(message)}\n\n"
+        f"{scoped_message}"
+    )
 
     await store_message(session_id, "user", message)
     context = await get_context(session_id, query=message)

@@ -773,33 +773,20 @@ export function ContextGraphView({
                   </option>
                 ))}
               </select>
-              <select
-                value={filterValue}
-                onChange={(e) => setFilterValue(e.currentTarget.value)}
-                style={{
-                  flex: 1,
-                  border: "1px solid #e2e8f0",
-                  borderRadius: "0.375rem",
-                  padding: "0.25rem 0.5rem",
-                  minHeight: "32px",
-                  background: "white",
-                  maxWidth: "460px",
-                }}
-              >
-                <option value="">(all)</option>
-                {availableFilterValues.map((value) => (
-                  <option key={value} value={value}>
-                    {value}
-                  </option>
-                ))}
-              </select>
               <Input
                 size="sm"
                 value={filterValue}
                 onChange={(e) => setFilterValue(e.target.value)}
                 placeholder={`Type ${FILTERABLE_FIELDS.find((f) => f.key === filterField)?.label || "value"}...`}
-                maxW="320px"
+                list="triagefix-filter-values"
+                maxW="460px"
               />
+              <datalist id="triagefix-filter-values">
+                <option value="">(all)</option>
+                {availableFilterValues.map((value) => (
+                  <option key={value} value={value} />
+                ))}
+              </datalist>
               <Button
                 size="sm"
                 disabled={!incidentInput}
