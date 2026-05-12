@@ -738,8 +738,7 @@ async def triagefix_incident_decision_support(incident_id: str):
               AND i.created_date IS NOT NULL
               AND date(older.created_date) < date(i.created_date)
             WITH collect(DISTINCT older) AS priors, max(older.created_date) AS latest_prior_incident_date
-            CALL {
-              WITH priors
+            CALL (priors) {
               UNWIND priors AS o
               OPTIONAL MATCH (o)-[:HAS_CATEGORY]->(oc:Category)
               WITH DISTINCT oc.name AS category
