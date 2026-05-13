@@ -4,7 +4,7 @@
 -include .env
 export
 
-.PHONY: start dev dev-backend dev-frontend install schema seed reset test-connection clean test test-e2e lint docker-build docker-prod-up docker-prod-down
+.PHONY: start dev dev-backend dev-frontend install schema seed reset test-connection triage-check triage-load triage-similarity clean test test-e2e lint docker-build docker-prod-up docker-prod-down
 
 # Start both backend and frontend
 start:
@@ -34,22 +34,46 @@ install-frontend:
 # Install everything
 install: install-backend install-frontend
 
-# Apply Neo4j schema constraints and indexes only (no data)
+# Legacy scaffold command: applies Agent Memory scaffold schema (cypher/schema.cypher).
+# Do not use for the active TriageFix demo workflow.
 schema:
+	@echo "WARNING: 'make schema' is a legacy Agent Memory scaffold command."
+	@echo "WARNING: For TriageFix demo, use 'make triage-load' and 'make triage-similarity' instead."
 	cd backend && uv run python -c "import asyncio; from scripts.generate_data import apply_schema; asyncio.run(apply_schema())"
 
-# Apply schema and ingest fixtures.json into Neo4j (real data if present, otherwise dummy data)
+# Legacy scaffold command: applies Agent Memory fixtures from data/fixtures.json.
+# Do not use for the active TriageFix demo workflow.
 seed:
+	@echo "WARNING: 'make seed' is a legacy Agent Memory fixture command."
+	@echo "WARNING: For TriageFix demo, use 'make triage-load' and 'make triage-similarity' instead."
 	cd backend && uv run python scripts/generate_data.py
 
-# Reset Neo4j data (drop and recreate)
+# Destructive command: resets Neo4j data (drop and recreate).
+# Do not run unless you explicitly intend to destroy and recreate graph data.
 reset:
+	@echo "DANGER: 'make reset' is destructive and will drop/recreate Neo4j data."
 	cd backend && uv run python -c "from app.context_graph_client import reset_database; import asyncio; asyncio.run(reset_database())"
 
 # Test Neo4j connection
 test-connection:
 	@cd backend && uv run python -c "import asyncio; from app.context_graph_client import connect_neo4j; asyncio.run(connect_neo4j()); print('Neo4j connection successful')" \
 		|| echo "Connection failed. Check NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD in .env"
+
+# TriageFix read-only check (no data mutation)
+triage-check:
+	@echo "TriageFix graph source: $${TRIAGEFIX_GRAPH_SOURCE:-airtable_enriched_sample}"
+	@echo "TriageFix input CSV: $${TRIAGEFIX_GRAPH_INPUT_CSV:-data/processed/enriched_incidents_full.csv}"
+	@$(MAKE) test-connection
+
+# TriageFix active loader (replaces prior managed nodes for current source)
+triage-load:
+	@echo "Using TRIAGEFIX_GRAPH_INPUT_CSV=$${TRIAGEFIX_GRAPH_INPUT_CSV:-data/processed/enriched_incidents_full.csv}"
+	@export TRIAGEFIX_GRAPH_INPUT_CSV="$${TRIAGEFIX_GRAPH_INPUT_CSV:-$$(pwd)/data/processed/enriched_incidents_full.csv}"; \
+		cd backend && uv run python scripts/04_load_triagefix_graph.py
+
+# TriageFix semantic similarity edge builder (SIMILAR_TO)
+triage-similarity:
+	cd backend && uv run python scripts/05_create_semantic_similarity_edges.py
 
 # Docker Neo4j
 docker-up:
