@@ -19,10 +19,30 @@ make install
 # Start Neo4j (Docker)
 make docker-up
 
-# Seed sample data
-make seed
+# Check connectivity/source and load TriageFix graph
+make triage-check
+make triage-load
+make triage-similarity
 
 # Start the application
+make start
+```
+
+## Current TriageFix Demo Workflow
+
+The current working TriageFix demo graph is loaded and updated through the TriageFix scripts, not the legacy scaffold seed flow.
+
+- Active graph loader: `backend/scripts/04_load_triagefix_graph.py`
+- Semantic similarity edges: `backend/scripts/05_create_semantic_similarity_edges.py`
+- `data/ontology.yaml` is being realigned to become the source of truth, but is not yet consumed at runtime.
+- `make seed` and `make schema` are legacy scaffold commands (Agent Memory) and should not be used for the current TriageFix demo workflow.
+
+Recommended commands:
+
+```bash
+make triage-check
+make triage-load
+make triage-similarity
 make start
 ```
 
