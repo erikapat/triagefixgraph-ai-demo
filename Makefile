@@ -4,7 +4,7 @@
 -include .env
 export
 
-.PHONY: start dev dev-backend dev-frontend install schema seed reset test-connection triage-check triage-load triage-similarity clean test test-e2e lint docker-build docker-prod-up docker-prod-down
+.PHONY: start dev dev-backend dev-frontend install schema seed reset test-connection triage-check triage-enrich-full triage-load triage-load-decision triage-similarity clean test test-e2e lint docker-build docker-prod-up docker-prod-down
 
 # Start both backend and frontend
 start:
@@ -61,15 +61,25 @@ test-connection:
 
 # TriageFix read-only check (no data mutation)
 triage-check:
-	@echo "TriageFix graph source: $${TRIAGEFIX_GRAPH_SOURCE:-airtable_enriched_sample}"
+	@echo "TriageFix graph source: $${TRIAGEFIX_GRAPH_SOURCE:-airtable_enriched_full}"
 	@echo "TriageFix input CSV: $${TRIAGEFIX_GRAPH_INPUT_CSV:-data/processed/enriched_incidents_full.csv}"
 	@$(MAKE) test-connection
+
+# TriageFix full-data enrichment (regenerates enriched_incidents_full.*)
+triage-enrich-full:
+	cd backend && uv run python scripts/03_enrich_all_incidences_for_graph.py
 
 # TriageFix active loader (replaces prior managed nodes for current source)
 triage-load:
 	@echo "Using TRIAGEFIX_GRAPH_INPUT_CSV=$${TRIAGEFIX_GRAPH_INPUT_CSV:-data/processed/enriched_incidents_full.csv}"
 	@export TRIAGEFIX_GRAPH_INPUT_CSV="$${TRIAGEFIX_GRAPH_INPUT_CSV:-$$(pwd)/data/processed/enriched_incidents_full.csv}"; \
 		cd backend && uv run python scripts/04_load_triagefix_graph.py
+
+# TriageFix decision graph loader (same dataset/source, decision-specific nodes/edges)
+triage-load-decision:
+	@echo "Using TRIAGEFIX_GRAPH_INPUT_CSV=$${TRIAGEFIX_GRAPH_INPUT_CSV:-data/processed/enriched_incidents_full.csv}"
+	@export TRIAGEFIX_GRAPH_INPUT_CSV="$${TRIAGEFIX_GRAPH_INPUT_CSV:-$$(pwd)/data/processed/enriched_incidents_full.csv}"; \
+		cd backend && uv run python scripts/load_treafefix_decision.py
 
 # TriageFix semantic similarity edge builder (SIMILAR_TO)
 triage-similarity:

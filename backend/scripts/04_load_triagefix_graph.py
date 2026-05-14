@@ -15,9 +15,9 @@ from neo4j import GraphDatabase
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
-DEFAULT_INPUT_CSV = REPO_ROOT / "data" / "processed" / "enriched_incidents_demo.csv"
+DEFAULT_INPUT_CSV = REPO_ROOT / "data" / "processed" / "enriched_incidents_full.csv"
 
-SOURCE_VALUE = "airtable_enriched_sample"
+SOURCE_VALUE = os.getenv("TRIAGEFIX_GRAPH_SOURCE", "airtable_enriched_full").strip() or "airtable_enriched_full"
 MANAGED_LABEL = "TriageFixManaged"
 
 
@@ -109,10 +109,13 @@ def _create_constraints_and_indexes(session: Any) -> None:
         "CREATE CONSTRAINT propertycontext_property_context_id_unique IF NOT EXISTS FOR (n:PropertyContext) REQUIRE n.property_context_id IS UNIQUE",
         "CREATE CONSTRAINT category_name_unique IF NOT EXISTS FOR (n:Category) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT subcategory_name_unique IF NOT EXISTS FOR (n:Subcategory) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT uniqueid_name_unique IF NOT EXISTS FOR (n:UniqueId) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT transactionnameresolved_name_unique IF NOT EXISTS FOR (n:TransactionNameResolved) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT urgency_name_unique IF NOT EXISTS FOR (n:Urgency) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT status_name_unique IF NOT EXISTS FOR (n:Status) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT tradespecialist_name_unique IF NOT EXISTS FOR (n:TradeSpecialist) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT renovator_name_unique IF NOT EXISTS FOR (n:Renovator) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT reforma_reforma_id_unique IF NOT EXISTS FOR (n:Reforma) REQUIRE n.reforma_id IS UNIQUE",
         "CREATE CONSTRAINT areacluster_name_unique IF NOT EXISTS FOR (n:AreaCluster) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT recommendedaction_name_unique IF NOT EXISTS FOR (n:RecommendedAction) REQUIRE n.name IS UNIQUE",
         "CREATE CONSTRAINT evidence_evidence_id_unique IF NOT EXISTS FOR (n:Evidence) REQUIRE n.evidence_id IS UNIQUE",
@@ -133,7 +136,7 @@ def _cleanup_previous_load(session: Any) -> None:
 
 
 def _load_row(session: Any, row: dict[str, str]) -> None:
-    incident_id = _normalize_text(row.get("airtable_record_id"))
+    incident_id = _normalize_text(row.get("airtable_record_id")) or _normalize_text(row.get("incident_id"))
     if not incident_id:
         return
 
@@ -147,6 +150,8 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
     trade_name = _normalize_text(row.get("recommended_trade")) or "Human review or general handyman"
     renovator_name = _normalize_text(row.get("provider_candidate"))
     action_name = _normalize_text(row.get("recommended_action")) or "Ask missing questions before assigning provider"
+    transaction_name = _normalize_text(row.get("Transaction Name")) or _normalize_text(row.get("transaction name")) or _normalize_text(row.get("UNIQUE ID")) or _normalize_text(row.get("UNIQUE_ID"))
+    reforma_flag = _normalize_text(row.get("reforma")).lower()
     similarity_key = _normalize_text(row.get("similarity_key")) or f"{property_context_id}::{category_name}"
 
     created_date = _parse_date(row.get("Created date"))
@@ -173,7 +178,8 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
         "days_to_evaluate": _normalize_text(row.get("Days to evaluate")),
         "clean_description": _normalize_text(row.get("clean_description")),
         "description": _normalize_text(row.get("Description")),
-        "original_unique_id": _normalize_text(row.get("UNIQUE ID")),
+        "original_unique_id": _normalize_text(row.get("UNIQUE ID")) or _normalize_text(row.get("UNIQUE_ID")),
+        "property_ready_date": _parse_date(row.get("Property Ready Date")) or _normalize_text(row.get("Property Ready Date")),
         "type_name": _normalize_text(row.get("Type")),
         "cost": _normalize_text(row.get("Cost")),
         "cost_responsibility": _normalize_text(row.get("Cost Responsibility")),
@@ -182,7 +188,15 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
         "incidence_red_flags": _normalize_text(row.get("Incidence red flags")),
         "technical_construction": _normalize_text(row.get("Technical construction")),
         "solution_description": _normalize_text(row.get("Solution description")),
-        "transaction_name": _normalize_text(row.get("Transaction Name")),
+        "transaction_name": transaction_name,
+        "transaction_name_raw": _normalize_text(row.get("transaction name")) or _normalize_text(row.get("Transaction Name")),
+        "transaction_name_resolved": _normalize_text(row.get("Transaction Name Resolved")) or transaction_name,
+        "tech_budget_attachment_urls": _normalize_text(row.get("TECH - Budget Attachment (URLs)")),
+        "furniture_budget_doc": _normalize_text(row.get("Furniture budget doc")),
+        "reforma": reforma_flag,
+        "property_ready_band": _normalize_text(row.get("property_ready_band")),
+        "budget_attachment_match": _normalize_text(row.get("budget_attachment_match")),
+        "seguro": _normalize_text(row.get("seguro")),
         "property_manager": _normalize_text(row.get("Property manager")),
         "renovator_name_original": _normalize_text(row.get("Renovator name")),
         "category_confidence": _parse_float(row.get("category_confidence")),
@@ -200,6 +214,9 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
         "trade_name": trade_name,
         "renovator_name": renovator_name,
         "action_name": action_name,
+        "transaction_name": transaction_name,
+        "reforma_flag": reforma_flag,
+        "reforma_id": f"reforma::{incident_id}",
         "resolution_band": resolution_band,
         "evidence_id": f"evidence::{incident_id}",
         "incidence_docs_count": incidence_docs_count,
@@ -229,6 +246,7 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
             i.description = $description,
             i.clean_description = $clean_description,
             i.original_unique_id = $original_unique_id,
+            i.property_ready_date = $property_ready_date,
             i.type = $type_name,
             i.cost = $cost,
             i.cost_responsibility = $cost_responsibility,
@@ -238,6 +256,14 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
             i.technical_construction = $technical_construction,
             i.solution_description = $solution_description,
             i.transaction_name = $transaction_name,
+            i.transaction_name_raw = $transaction_name_raw,
+            i.transaction_name_resolved = $transaction_name_resolved,
+            i.tech_budget_attachment_urls = $tech_budget_attachment_urls,
+            i.furniture_budget_doc = $furniture_budget_doc,
+            i.reforma = $reforma,
+            i.property_ready_band = $property_ready_band,
+            i.budget_attachment_match = $budget_attachment_match,
+            i.seguro = $seguro,
             i.property_manager = $property_manager,
             i.renovator_name_original = $renovator_name_original,
             i.category_confidence = $category_confidence,
@@ -249,47 +275,94 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
 
         MERGE (p:PropertyContext {{property_context_id: $property_context_id}})
         SET p:{MANAGED_LABEL}, p.source = $source
-
         MERGE (a:AreaCluster {{name: $area_cluster}})
         SET a:{MANAGED_LABEL}, a.source = $source
-
         MERGE (c:Category {{name: $category_name}})
         SET c:{MANAGED_LABEL}, c.source = $source
-
         MERGE (s:Subcategory {{name: $subcategory_name}})
         SET s:{MANAGED_LABEL}, s.source = $source
-
         MERGE (u:Urgency {{name: $urgency_name}})
         SET u:{MANAGED_LABEL}, u.source = $source
-
         MERGE (st:Status {{name: $status_name}})
         SET st:{MANAGED_LABEL}, st.source = $source
-
         MERGE (t:TradeSpecialist {{name: $trade_name}})
         SET t:{MANAGED_LABEL}, t.source = $source
-
         MERGE (ra:RecommendedAction {{name: $action_name}})
         SET ra:{MANAGED_LABEL}, ra.source = $source
-
         MERGE (rtb:ResolutionTimeBand {{name: $resolution_band}})
         SET rtb:{MANAGED_LABEL}, rtb.source = $source
 
         MERGE (i)-[:HAS_PROPERTY_CONTEXT]->(p)
         MERGE (p)-[:LOCATED_IN_AREA]->(a)
         MERGE (i)-[:HAS_CATEGORY]->(c)
-        MERGE (i)-[:HAS_SUBCATEGORY]->(s)
+        MERGE (c)-[:HAS_SUBCATEGORY]->(s)
         MERGE (i)-[:HAS_URGENCY]->(u)
         MERGE (i)-[:HAS_STATUS]->(st)
         MERGE (i)-[:REQUIRES_TRADE]->(t)
         MERGE (i)-[:RECOMMENDED_ACTION]->(ra)
         MERGE (i)-[:HAS_RESOLUTION_TIME_BAND]->(rtb)
+        """,
+        params,
+    ).consume()
 
-        FOREACH (_ IN CASE WHEN $renovator_name <> '' THEN [1] ELSE [] END |
+    session.run(
+        f"""
+        MATCH (i:Incident:{MANAGED_LABEL} {{source: $source, incident_id: $incident_id}})
+        MATCH (p:PropertyContext:{MANAGED_LABEL} {{source: $source, property_context_id: $property_context_id}})
+        FOREACH (_ IN CASE WHEN $transaction_name <> '' THEN [1] ELSE [] END |
+          MERGE (uid:UniqueId {{name: $transaction_name}})
+          SET uid:{MANAGED_LABEL}, uid.source = $source
+          MERGE (i)-[:HAS_UNIQUE_ID]->(uid)
+          MERGE (uid)-[:IDENTIFIES_PROPERTY_CONTEXT]->(p)
+          MERGE (p)-[:HAS_UNIQUE_ID]->(uid)
+          FOREACH (__ IN CASE WHEN $transaction_name_resolved <> '' THEN [1] ELSE [] END |
+            MERGE (tnr:TransactionNameResolved {{name: $transaction_name_resolved}})
+            SET tnr:{MANAGED_LABEL}, tnr.source = $source
+            MERGE (i)-[:HAS_TRANSACTION_NAME_RESOLVED]->(tnr)
+            MERGE (p)-[:HAS_TRANSACTION_NAME_RESOLVED]->(tnr)
+            MERGE (tnr)-[:RESOLVES_TO_UNIQUE_ID]->(uid)
+          )
+        )
+        """,
+        params,
+    ).consume()
+
+    session.run(
+        f"""
+        MATCH (i:Incident:{MANAGED_LABEL} {{source: $source, incident_id: $incident_id}})
+        MATCH (p:PropertyContext:{MANAGED_LABEL} {{source: $source, property_context_id: $property_context_id}})
+        FOREACH (_ IN CASE WHEN $reforma_flag = 'si' THEN [1] ELSE [] END |
+          MERGE (rf:Reforma {{reforma_id: $reforma_id}})
+          SET rf:{MANAGED_LABEL},
+              rf.source = $source,
+              rf.flag = $reforma_flag
+          MERGE (i)-[:HAS_REFORMA]->(rf)
+          MERGE (rf)-[:REFORMA_ON_PROPERTY]->(p)
+        )
+        """,
+        params,
+    ).consume()
+
+    session.run(
+        f"""
+        MATCH (i:Incident:{MANAGED_LABEL} {{source: $source, incident_id: $incident_id}})
+        FOREACH (_ IN CASE WHEN $renovator_name <> '' AND $reforma_flag = 'si' THEN [1] ELSE [] END |
           MERGE (r:Renovator {{name: $renovator_name}})
           SET r:{MANAGED_LABEL}, r.source = $source
           MERGE (i)-[:HANDLED_BY]->(r)
+          MERGE (rf:Reforma {{reforma_id: $reforma_id}})
+          SET rf:{MANAGED_LABEL},
+              rf.source = $source,
+              rf.flag = $reforma_flag
+          MERGE (r)-[:HANDLES_REFORMA]->(rf)
         )
+        """,
+        params,
+    ).consume()
 
+    session.run(
+        f"""
+        MATCH (i:Incident:{MANAGED_LABEL} {{source: $source, incident_id: $incident_id}})
         FOREACH (_ IN CASE WHEN $has_any_attachment THEN [1] ELSE [] END |
           MERGE (e:Evidence {{evidence_id: $evidence_id}})
           SET e:{MANAGED_LABEL},
@@ -301,14 +374,18 @@ def _load_row(session: Any, row: dict[str, str]) -> None:
               e.finance_invoice_count = $finance_invoice_count
           MERGE (i)-[:HAS_EVIDENCE]->(e)
         )
-
         FOREACH (q IN $missing_questions |
           MERGE (mq:MissingQuestion {{text: q}})
           SET mq:{MANAGED_LABEL}, mq.source = $source
           MERGE (i)-[:NEEDS_QUESTION]->(mq)
         )
+        """,
+        params,
+    ).consume()
 
-        WITH i
+    session.run(
+        f"""
+        MATCH (i:Incident:{MANAGED_LABEL} {{source: $source, incident_id: $incident_id}})
         UNWIND [
           {{dimension: 'people_risk', score: $severity_people_risk}},
           {{dimension: 'habitability', score: $severity_habitability}},
@@ -369,10 +446,13 @@ def _fetch_node_counts(session: Any) -> dict[str, int]:
         "AreaCluster",
         "Category",
         "Subcategory",
+        "UniqueId",
+        "TransactionNameResolved",
         "Urgency",
         "Status",
         "TradeSpecialist",
         "Renovator",
+        "Reforma",
         "RecommendedAction",
         "Evidence",
         "MissingQuestion",
@@ -396,10 +476,17 @@ def _fetch_relationship_counts(session: Any) -> dict[str, int]:
         "LOCATED_IN_AREA",
         "HAS_CATEGORY",
         "HAS_SUBCATEGORY",
+        "HAS_UNIQUE_ID",
+        "HAS_TRANSACTION_NAME_RESOLVED",
+        "RESOLVES_TO_UNIQUE_ID",
+        "IDENTIFIES_PROPERTY_CONTEXT",
         "HAS_URGENCY",
         "HAS_STATUS",
         "REQUIRES_TRADE",
         "HANDLED_BY",
+        "HAS_REFORMA",
+        "REFORMA_ON_PROPERTY",
+        "HANDLES_REFORMA",
         "RECOMMENDED_ACTION",
         "HAS_EVIDENCE",
         "NEEDS_QUESTION",

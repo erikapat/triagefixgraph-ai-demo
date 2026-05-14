@@ -44,6 +44,7 @@ interface Message {
 interface ChatInterfaceProps {
   onGraphUpdate?: (data: GraphData) => void;
   selectedIncidentId?: string | null;
+  graphViewMode?: "incident" | "decision" | "schema";
   onSelectedIncidentChange?: (incidentId: string | null) => void;
   externalInput?: string | null;
   onExternalInputConsumed?: () => void;
@@ -163,7 +164,7 @@ function extractIncidentIdFromGraphData(graphData: GraphData | undefined): strin
   return null;
 }
 
-export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedIncidentChange, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
+export function ChatInterface({ onGraphUpdate, selectedIncidentId, graphViewMode = "incident", onSelectedIncidentChange, externalInput, onExternalInputConsumed }: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -277,6 +278,8 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
         body: JSON.stringify({
           message: messageText,
           session_id: sessionId,
+          graph_view_mode: graphViewMode,
+          selected_incident_id: selectedIncidentId,
         }),
         signal: controller.signal,
       });
@@ -347,7 +350,7 @@ export function ChatInterface({ onGraphUpdate, selectedIncidentId, onSelectedInc
                     return tc;
                   });
                   setStreamingToolCalls([...toolCalls]);
-                  if (data.graph_data?.results?.length && onGraphUpdate) {
+                  if (graphViewMode !== "decision" && data.graph_data?.results?.length && onGraphUpdate) {
                     onGraphUpdate(data.graph_data);
                   }
                   const incidentFromGraph = extractIncidentIdFromGraphData(data.graph_data);

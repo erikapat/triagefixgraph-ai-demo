@@ -78,6 +78,7 @@ interface ContextGraphViewProps {
   selectedIncidentId?: string | null;
   onSelectedIncidentChange?: (incidentId: string | null) => void;
   onAskAbout?: (entityName: string) => void;
+  onViewModeChange?: (mode: "incident" | "decision" | "schema") => void;
 }
 
 const TECHNICAL_LABELS = new Set(["TriageFixManaged"]);
@@ -88,12 +89,56 @@ const FILTERABLE_FIELDS = [
   { key: "area_cluster", label: "AreaCluster" },
   { key: "category", label: "Category" },
   { key: "subcategory", label: "Subcategory" },
+  { key: "UNIQUE ID", label: "UNIQUE ID" },
   { key: "urgency", label: "Urgency" },
   { key: "status", label: "Status" },
   { key: "trade_specialist", label: "TradeSpecialist" },
   { key: "renovator", label: "Renovator" },
   { key: "resolution_time_band", label: "ResolutionTimeBand" },
 ] as const;
+
+const DECISION_LEGEND_ORDER: Array<{ key: string; label: string }> = [
+  { key: "Incident", label: "Incident" },
+  { key: "UniqueId", label: "Unique ID" },
+  { key: "PropertyContext", label: "Property Context" },
+  { key: "TransactionNameResolved", label: "Transaction Name Resolved" },
+  { key: "UrgencyDecision", label: "Urgency (Decision)" },
+  { key: "ReformaDecision", label: "Reforma (si/no)" },
+  { key: "PropertyReadyBandDecision", label: "Property Ready Band" },
+  { key: "BudgetAttachmentMatchDecision", label: "Budget Attachment Match" },
+  { key: "PropertyManagerDecision", label: "Property Manager" },
+  { key: "SeguroDecision", label: "Seguro (si/no)" },
+  { key: "TechnicalConstructionDecision", label: "Technical Construction" },
+  { key: "RenovatorDecision", label: "Renovator" },
+];
+
+const DECISION_NODE_COLORS: Record<string, string> = {
+  Incident: "#E53E3E",
+  UniqueId: "#4C51BF",
+  PropertyContext: "#0EA5E9",
+  TransactionNameResolved: "#334155",
+  UrgencyDecision: "#F59E0B",
+  ReformaDecision: "#7C3AED",
+  PropertyReadyBandDecision: "#2563EB",
+  BudgetAttachmentMatchDecision: "#0891B2",
+  PropertyManagerDecision: "#16A34A",
+  SeguroDecision: "#059669",
+  TechnicalConstructionDecision: "#D97706",
+  RenovatorDecision: "#C026D3",
+};
+
+function getFilterFieldValue(row: Record<string, unknown>, field: (typeof FILTERABLE_FIELDS)[number]["key"]): string {
+  if (field === "UNIQUE ID") {
+    return String(
+      row["UNIQUE ID"] ??
+      row["UNIQUE_ID"] ??
+      row["original_unique_id"] ??
+      row["property_context_id"] ??
+      "",
+    ).trim();
+  }
+  return String(row[field] ?? "").trim();
+}
 
 // ---------------------------------------------------------------------------
 // Helpers — convert backend serialized data to internal format
@@ -193,6 +238,7 @@ function extractNodesAndRels(results: Record<string, unknown>[]): InternalGraphD
 
 function getNodeColor(labels: string[]): string {
   for (const label of labels) {
+    if (DECISION_NODE_COLORS[label]) return DECISION_NODE_COLORS[label];
     if (NODE_COLORS[label]) return NODE_COLORS[label];
   }
   return "#6366f1";
@@ -214,6 +260,7 @@ export function ContextGraphView({
   selectedIncidentId,
   onSelectedIncidentChange,
   onAskAbout,
+  onViewModeChange,
 }: ContextGraphViewProps) {
   const [isSchemaView, setIsSchemaView] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -228,11 +275,20 @@ export function ContextGraphView({
   const [incidents, setIncidents] = useState<Record<string, unknown>[]>([]);
   const [incidentInput, setIncidentInput] = useState("");
   const [incidentContext, setIncidentContext] = useState<Record<string, unknown> | null>(null);
-  const [filterField, setFilterField] = useState<(typeof FILTERABLE_FIELDS)[number]["key"]>("incident_id");
+  const [filterField, setFilterField] = useState<(typeof FILTERABLE_FIELDS)[number]["key"]>("UNIQUE ID");
   const [filterValue, setFilterValue] = useState("");
   const [focusMode, setFocusMode] = useState<
     "decision_context" | "incident_links_only" | "missing_questions" | "severity_signals" | "all_context"
   >("decision_context");
+  const [isDecisionView, setIsDecisionView] = useState(false);
+
+  useEffect(() => {
+    if (isSchemaView) {
+      onViewModeChange?.("schema");
+      return;
+    }
+    onViewModeChange?.(isDecisionView ? "decision" : "incident");
+  }, [isSchemaView, isDecisionView, onViewModeChange]);
 
   // Load incidents on mount
   useEffect(() => {
@@ -241,6 +297,7 @@ export function ContextGraphView({
 
   // When external graph data arrives from chat, switch to data view
   useEffect(() => {
+    if (isDecisionView) return;
     if (externalGraphData?.results?.length) {
       const data = extractNodesAndRels(externalGraphData.results);
       if (data.nodes.length > 0) {
@@ -252,24 +309,21 @@ export function ContextGraphView({
         setSelectedRelId(null);
       }
     }
-  }, [externalGraphData]);
+  }, [externalGraphData, isDecisionView]);
 
   useEffect(() => {
-    if (selectedIncidentId && selectedIncidentId !== incidentInput) {
-      // Keep chat-driven incident selection in sync with controls.
-      // Force Incident filter so the selected id is not overwritten by
-      // a previous field filter (e.g., Renovator).
-      setFilterField("incident_id");
-      setFilterValue(selectedIncidentId);
-      setIncidentInput(selectedIncidentId);
-      loadIncidentContext(selectedIncidentId);
-    }
-  }, [selectedIncidentId]);
+    // Only hydrate once from external selection (e.g., chat deep-link),
+    // and never override an already active local selector state.
+    if (!selectedIncidentId) return;
+    if (incidentInput.trim()) return;
+    setIncidentInput(selectedIncidentId);
+    void loadIncidentContext(selectedIncidentId);
+  }, [selectedIncidentId, incidentInput]);
 
   const availableFilterValues = useMemo(() => {
     const values = new Set<string>();
     for (const row of incidents) {
-      const raw = String(row[filterField] ?? "").trim();
+      const raw = getFilterFieldValue(row, filterField);
       if (raw) values.add(raw);
     }
     return Array.from(values).sort((a, b) => a.localeCompare(b));
@@ -279,21 +333,48 @@ export function ContextGraphView({
     const needle = filterValue.trim().toLowerCase();
     if (!needle) return incidents;
     return incidents.filter((row) =>
-      String(row[filterField] ?? "").trim().toLowerCase().includes(needle)
+      getFilterFieldValue(row, filterField).toLowerCase().includes(needle)
     );
   }, [incidents, filterField, filterValue]);
 
   useEffect(() => {
+    const firstFilteredId = String(filteredIncidents[0]?.incident_id ?? "").trim();
     const currentInFiltered = filteredIncidents.some(
       (row) => String(row.incident_id ?? "").trim() === incidentInput.trim()
     );
-    if (incidentInput.trim() && currentInFiltered) {
+
+    // When user is actively filtering, always target the first matched incident.
+    if (filterValue.trim()) {
+      const needle = filterValue.trim().toLowerCase();
+      const exact = incidents.find(
+        (row) => getFilterFieldValue(row, filterField).toLowerCase() === needle
+      );
+      if (exact) {
+        const exactId = String(exact.incident_id ?? "").trim();
+        if (exactId && exactId !== incidentInput.trim()) {
+          setIncidentInput(exactId);
+        }
+        return;
+      }
+      if (firstFilteredId && firstFilteredId !== incidentInput.trim()) {
+        setIncidentInput(firstFilteredId);
+      }
       return;
     }
 
-    const firstFilteredId = String(filteredIncidents[0]?.incident_id ?? "").trim();
+    if (incidentInput.trim() && currentInFiltered) {
+      return;
+    }
     setIncidentInput(firstFilteredId || "");
-  }, [filteredIncidents]);
+  }, [filteredIncidents, filterValue, incidentInput, filterField, incidents]);
+
+  useEffect(() => {
+    const target = incidentInput.trim();
+    if (!target) return;
+    const current = String(incidentContext?.incident_id ?? "").trim();
+    if (current === target) return;
+    void loadIncidentContext(target);
+  }, [incidentInput, incidentContext]);
 
   async function loadIncidents() {
     setLoading(true);
@@ -308,6 +389,12 @@ export function ContextGraphView({
           ?.incident_id as string | undefined) ||
         (rows[0]?.incident_id as string | undefined);
       if (preferredId) {
+        const preferredRow = rows.find(
+          (r: Record<string, unknown>) => String(r.incident_id || "") === preferredId,
+        );
+        const preferredUniqueId = String(preferredRow?.["UNIQUE ID"] ?? "").trim();
+        setFilterField("UNIQUE ID");
+        setFilterValue(preferredUniqueId || "");
         setIncidentInput(preferredId);
         onSelectedIncidentChange?.(preferredId);
         await loadIncidentContext(preferredId);
@@ -324,7 +411,10 @@ export function ContextGraphView({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/triagefix/incidents/${encodeURIComponent(incidentId)}/context`, {
+      const endpoint = isDecisionView
+        ? `${API_BASE}/triagefix/incidents/${encodeURIComponent(incidentId)}/decision-context`
+        : `${API_BASE}/triagefix/incidents/${encodeURIComponent(incidentId)}/context`;
+      const res = await fetch(endpoint, {
         signal: AbortSignal.timeout(12000),
       });
       if (!res.ok) throw new Error("incident not found");
@@ -350,6 +440,13 @@ export function ContextGraphView({
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    const target = incidentInput.trim();
+    if (!target) return;
+    void loadIncidentContext(target);
+    // Switch endpoint payload when changing tab mode.
+  }, [isDecisionView]);
 
   async function loadSchema() {
     setLoading(true);
@@ -491,34 +588,6 @@ export function ContextGraphView({
     [graphData, isSchemaView, isExpanding, expandedNodes, baseIncidentGraph],
   );
 
-  // Click: select node and show properties
-  const handleNodeClick = useCallback(
-    (node: NvlNode) => {
-      if (!graphData) return;
-      const original = graphData.nodes.find((n) => n.id === node.id);
-      if (original) {
-        setSelectedElement({ type: "node", data: original });
-        setSelectedNodeId(node.id);
-        setSelectedRelId(null);
-      }
-    },
-    [graphData],
-  );
-
-  // Click relationship
-  const handleRelationshipClick = useCallback(
-    (rel: NvlRelationship) => {
-      if (!graphData) return;
-      const original = graphData.relationships.find((r) => r.id === rel.id);
-      if (original) {
-        setSelectedElement({ type: "relationship", data: original });
-        setSelectedRelId(rel.id);
-        setSelectedNodeId(null);
-      }
-    },
-    [graphData],
-  );
-
   // Click canvas: deselect
   const handleCanvasClick = useCallback(() => {
     setSelectedElement(null);
@@ -532,11 +601,12 @@ export function ContextGraphView({
     if (focusMode === "all_context") return graphData;
 
     const nodeById = new Map(graphData.nodes.map((n) => [n.id, n]));
+    const activeIncidentId = (selectedIncidentId || incidentInput || "").trim();
     const selectedIncidentNodeId =
       graphData.nodes.find(
         (n) =>
           n.labels.includes("Incident") &&
-          String((n.properties.incident_id as string | undefined) ?? "") === (selectedIncidentId || ""),
+          String((n.properties.incident_id as string | undefined) ?? "") === activeIncidentId,
       )?.id ?? null;
     if (!selectedIncidentNodeId) return graphData;
 
@@ -544,21 +614,42 @@ export function ContextGraphView({
     const keepRelIds = new Set<string>();
 
     if (focusMode === "decision_context") {
-      const contextLabels = new Set([
-        "Incident",
-        "PropertyContext",
-        "AreaCluster",
-        "Category",
-        "Subcategory",
-        "Urgency",
-        "Status",
-        "RecommendedAction",
-        "TradeSpecialist",
-        "Renovator",
-        "Evidence",
-      ]);
+      const contextLabels = isDecisionView
+        ? new Set([
+            "Incident",
+            "PropertyContext",
+            "UniqueId",
+            "TransactionNameResolved",
+            "UrgencyDecision",
+            "ReformaDecision",
+            "PropertyReadyBandDecision",
+            "BudgetAttachmentMatchDecision",
+            "PropertyManagerDecision",
+            "SeguroDecision",
+            "TechnicalConstructionDecision",
+            "RenovatorDecision",
+          ])
+        : new Set([
+            "Incident",
+            "PropertyContext",
+            "AreaCluster",
+            "Category",
+            "Subcategory",
+            "Urgency",
+            "Status",
+            "RecommendedAction",
+            "TradeSpecialist",
+            "Renovator",
+            "Evidence",
+            "UniqueId",
+            "TransactionName",
+          ]);
       for (const n of graphData.nodes) {
-        if (contextLabels.has(n.labels[0])) keepNodeIds.add(n.id);
+        const labelSet = new Set(n.labels);
+        const keepByLabel = [...labelSet].some((label) => contextLabels.has(label));
+        if (keepByLabel) {
+          keepNodeIds.add(n.id);
+        }
       }
       for (const r of graphData.relationships) {
         if ((r.type === "PRIOR_SIMILAR" || r.type === "SIMILAR_TO") &&
@@ -606,13 +697,71 @@ export function ContextGraphView({
         (r) => keepRelIds.has(r.id) && keepNodeIds.has(r.startNodeId) && keepNodeIds.has(r.endNodeId),
       ),
     };
-  }, [graphData, isSchemaView, focusMode, selectedIncidentId]);
+  }, [graphData, isSchemaView, focusMode, selectedIncidentId, incidentInput, isDecisionView]);
+
+  const renderedGraphData = useMemo((): InternalGraphData | null => {
+    if (!filteredGraphData) return null;
+    // Decision view now uses the real decision subgraph loaded in Neo4j.
+    if (isSchemaView || !isDecisionView) return filteredGraphData;
+    return filteredGraphData;
+  }, [filteredGraphData, isSchemaView, isDecisionView]);
+
+  const legendLabels = useMemo(() => {
+    if (!renderedGraphData) return [] as string[];
+    const labels = new Set<string>();
+    for (const node of renderedGraphData.nodes) {
+      if (node.labels[0]) labels.add(node.labels[0]);
+    }
+    return Array.from(labels).sort((a, b) => a.localeCompare(b));
+  }, [renderedGraphData]);
+
+  const legendItems = useMemo(() => {
+    if (!isDecisionView) {
+      return legendLabels.map((label) => ({ label, color: NODE_COLORS[label] || "#4A5568" }));
+    }
+    const ordered = DECISION_LEGEND_ORDER.map((item) => ({
+      label: item.label,
+      color: DECISION_NODE_COLORS[item.key] || NODE_COLORS[item.key] || "#4A5568",
+    }));
+    const leftovers = legendLabels
+      .filter((label) => !DECISION_LEGEND_ORDER.some((item) => item.key === label))
+      .map((label) => ({ label, color: DECISION_NODE_COLORS[label] || NODE_COLORS[label] || "#4A5568" }));
+    return [...ordered, ...leftovers];
+  }, [isDecisionView, legendLabels]);
+
+  // Click: select node and show properties
+  const handleNodeClick = useCallback(
+    (node: NvlNode) => {
+      if (!renderedGraphData) return;
+      const original = renderedGraphData.nodes.find((n) => n.id === node.id);
+      if (original) {
+        setSelectedElement({ type: "node", data: original });
+        setSelectedNodeId(node.id);
+        setSelectedRelId(null);
+      }
+    },
+    [renderedGraphData],
+  );
+
+  // Click relationship
+  const handleRelationshipClick = useCallback(
+    (rel: NvlRelationship) => {
+      if (!renderedGraphData) return;
+      const original = renderedGraphData.relationships.find((r) => r.id === rel.id);
+      if (original) {
+        setSelectedElement({ type: "relationship", data: original });
+        setSelectedRelId(rel.id);
+        setSelectedNodeId(null);
+      }
+    },
+    [renderedGraphData],
+  );
 
   // Transform to NVL format
   const nvlData = useMemo(() => {
-    if (!filteredGraphData) return { nodes: [], relationships: [] };
+    if (!renderedGraphData) return { nodes: [], relationships: [] };
 
-    const nodes: NvlNode[] = filteredGraphData.nodes.map((node) => {
+    const nodes: NvlNode[] = renderedGraphData.nodes.map((node) => {
       const isSelected = selectedNodeId === node.id;
       const isSelectedIncident =
         !!selectedIncidentId &&
@@ -659,7 +808,7 @@ export function ContextGraphView({
       };
     });
 
-    const relationships: NvlRelationship[] = filteredGraphData.relationships.map((rel) => {
+    const relationships: NvlRelationship[] = renderedGraphData.relationships.map((rel) => {
       const isSelected = selectedRelId === rel.id;
       return {
         id: rel.id,
@@ -672,7 +821,7 @@ export function ContextGraphView({
     });
 
     return { nodes, relationships };
-  }, [filteredGraphData, selectedNodeId, selectedRelId, expandedNodes, isSchemaView, selectedIncidentId]);
+  }, [renderedGraphData, selectedNodeId, selectedRelId, expandedNodes, isSchemaView, selectedIncidentId]);
 
   // Empty / error states
   if (error) {
@@ -701,25 +850,44 @@ export function ContextGraphView({
         align="center"
       >
         <Box>
-          <Heading size="sm">Knowledge Graph</Heading>
+          <Heading size="sm">repAIr Knowledge Graph</Heading>
           <Text fontSize="xs" color="gray.500">
             {isSchemaView
               ? "Schema view — double-click a label to explore"
-              : "Incident view — local context for selected incident"}
+              : isDecisionView
+                ? "Decision view — focused context for triage decisions"
+                : "Incident view — local context for selected incident"}
           </Text>
         </Box>
         <HStack gap={2}>
           <Button
             size="xs"
-            variant={isSchemaView ? "outline" : "solid"}
-            onClick={() => setIsSchemaView(false)}
+            variant={!isSchemaView && !isDecisionView ? "solid" : "outline"}
+            onClick={() => {
+              setIsSchemaView(false);
+              setIsDecisionView(false);
+            }}
           >
             Incident view
           </Button>
           <Button
             size="xs"
+            variant={!isSchemaView && isDecisionView ? "solid" : "outline"}
+            onClick={() => {
+              setIsSchemaView(false);
+              setIsDecisionView(true);
+              setFocusMode("decision_context");
+            }}
+          >
+            Decision view
+          </Button>
+          <Button
+            size="xs"
             variant={isSchemaView ? "solid" : "outline"}
-            onClick={loadSchema}
+            onClick={() => {
+              setIsDecisionView(false);
+              loadSchema();
+            }}
           >
             Schema view
           </Button>
@@ -854,14 +1022,13 @@ export function ContextGraphView({
         borderWidth="1px"
         borderColor="gray.200"
       >
-        {Object.entries(NODE_COLORS)
-          .map(([label, color]) => (
+        {legendItems.map((item) => (
             <Badge
-              key={label}
+              key={item.label}
               size="sm"
-              style={{ backgroundColor: color, color: "white" }}
+              style={{ backgroundColor: item.color, color: "white" }}
             >
-              {label}
+              {item.label}
             </Badge>
           ))}
       </Flex>

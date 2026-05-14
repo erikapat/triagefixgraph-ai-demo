@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Create deterministic enrichment for full Airtable incidences export."""
+"""Create deterministic enrichment for Airtable incidences export."""
 
 from __future__ import annotations
 
 import ast
 import csv
+import hashlib
 import json
 import re
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
 from typing import Any
+from urllib.request import Request, urlopen
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
-INPUT_CSV = REPO_ROOT / "data" / "airtable_sample" / "incidences_sample.csv"
+INPUT_CSV = REPO_ROOT / "data" / "airtable_full" / "incidences_full.csv"
 OUTPUT_DIR = REPO_ROOT / "data" / "processed"
 OUTPUT_CSV = OUTPUT_DIR / "enriched_incidents_full.csv"
 OUTPUT_JSON = OUTPUT_DIR / "enriched_incidents_full.json"
@@ -88,6 +91,111 @@ def _to_int(value: str | None) -> int:
         return int(float(text))
     except ValueError:
         return 0
+
+
+def _parse_date(value: str | None) -> datetime | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _property_ready_band(property_ready_date: str | None) -> str:
+    ready_dt = _parse_date(property_ready_date)
+    if ready_dt is None:
+        # Keep binary output even with missing dates.
+        return ">1y"
+    today = datetime.now().date()
+    delta_days = (today - ready_dt.date()).days
+    if delta_days < 0:
+        return "<1y"
+    if delta_days < 365:
+        return "<1y"
+    return ">1y"
+
+
+def _reforma_flag(
+    tech_budget_urls: str,
+    furniture_budget_doc: str,
+    furniture_budget_count: int,
+    renovator_name: str,
+) -> str:
+    if _is_non_empty(tech_budget_urls):
+        return "si"
+    if _is_non_empty(furniture_budget_doc):
+        return "si"
+    if furniture_budget_count > 0:
+        return "si"
+    if _is_non_empty(renovator_name):
+        return "si"
+    return "no"
+
+
+def _tokenize(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-zA-Z0-9áéíóúñü]+", text.lower()) if len(t) >= 4}
+
+
+def _extract_urls(text: str) -> list[str]:
+    return [u.strip() for u in re.findall(r"https?://[^\s,;]+", text or "") if u.strip()]
+
+
+def _try_fetch_text(url: str) -> str:
+    try:
+        req = Request(url, headers={"User-Agent": "triagefix-full-enricher/1.0"})
+        with urlopen(req, timeout=4) as resp:  # nosec B310
+            content_type = str(resp.headers.get("Content-Type", "")).lower()
+            if "text" not in content_type and "json" not in content_type and "xml" not in content_type:
+                return ""
+            data = resp.read(120_000)
+            return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _budget_attachment_match(incident_id: str, tech_budget_urls: str, description: str, clean_description: str) -> str:
+    def _fallback_random() -> str:
+        digest = hashlib.sha256((incident_id or "").encode("utf-8")).hexdigest()
+        return "si" if int(digest[:8], 16) % 2 == 0 else "no"
+
+    urls = _extract_urls(tech_budget_urls)
+    if not urls:
+        return _fallback_random()
+    incident_tokens = _tokenize(" ".join([description or "", clean_description or ""]))
+    if not incident_tokens:
+        return _fallback_random()
+
+    fetched_any = False
+    matched_any = False
+    for url in urls[:3]:
+        doc_text = _try_fetch_text(url)
+        if not _is_non_empty(doc_text):
+            continue
+        fetched_any = True
+        doc_tokens = _tokenize(doc_text)
+        if not doc_tokens:
+            continue
+        if len(incident_tokens & doc_tokens) >= 3:
+            matched_any = True
+            break
+
+    if matched_any:
+        return "si"
+    if fetched_any:
+        return "no"
+    return _fallback_random()
+
+
+def _seguro_flag_stable(incident_id: str) -> str:
+    digest = hashlib.sha256((incident_id or "").encode("utf-8")).hexdigest()
+    return "si" if int(digest[:8], 16) % 2 == 0 else "no"
 
 
 def _clean_description(text: str | None) -> str:
@@ -282,15 +390,23 @@ def _parse_year(created_date: str) -> str:
 
 
 def main() -> int:
+    t0 = time.time()
     if not INPUT_CSV.exists():
         raise FileNotFoundError(f"Input CSV not found: {INPUT_CSV}")
 
     with INPUT_CSV.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
+    print(f"input CSV: {INPUT_CSV}")
+    print(f"rows loaded: {len(rows)}")
 
     enriched_records: list[dict[str, Any]] = []
+    progress_every = 200
+    reforma_counter = Counter()
+    property_ready_band_counter = Counter()
+    budget_attachment_match_counter = Counter()
+    seguro_counter = Counter()
 
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
         record_id = row.get("airtable_record_id", "")
         raw_description = row.get("Description", "")
         clean_description = _clean_description(raw_description)
@@ -339,9 +455,22 @@ def main() -> int:
         incident_node_id = f"incident::{record_id}"
         property_context_id = unique_id or f"unknown_property::{record_id}"
         similarity_key = f"{property_context_id}::{inferred_category}"
+        tech_budget_urls = row.get("TECH - Budget Attachment (URLs)", "")
+        transaction_name_value = unique_id
+        transaction_name_resolved_value = _normalize_airtable_list(row.get("Transaction Name Resolved", ""))
+        furniture_budget_doc_value = row.get("Furniture budget doc", "")
+        reforma = _reforma_flag(tech_budget_urls, furniture_budget_doc_value, furniture_budget_count, renovator_name)
+        property_ready_band = _property_ready_band(row.get("Property Ready Date", ""))
+        budget_attachment_match = _budget_attachment_match(record_id, tech_budget_urls, raw_description, clean_description)
+        seguro = _seguro_flag_stable(record_id)
+        reforma_counter[reforma] += 1
+        property_ready_band_counter[property_ready_band] += 1
+        budget_attachment_match_counter[budget_attachment_match] += 1
+        seguro_counter[seguro] += 1
 
         enriched = {
             "airtable_record_id": record_id,
+            "incident_id": record_id,
             "airtable_created_time": row.get("airtable_created_time", ""),
             "Created date": row.get("Created date", ""),
             "Resolved date": row.get("Resolved date", ""),
@@ -354,6 +483,8 @@ def main() -> int:
             "Status": status,
             "Type": type_value,
             "UNIQUE ID": unique_id,
+            "UNIQUE_ID": unique_id,
+            "Property Ready Date": row.get("Property Ready Date", ""),
             "Renovator name": renovator_name,
             "Property manager": property_manager,
             "Area cluster": area_cluster_raw,
@@ -364,7 +495,15 @@ def main() -> int:
             "Incidence red flags": row.get("Incidence red flags", ""),
             "Technical construction": row.get("Technical construction", ""),
             "Solution description": row.get("Solution description", ""),
-            "Transaction Name": row.get("Transaction Name", ""),
+            "Transaction Name": transaction_name_value,
+            "transaction name": transaction_name_value,
+            "Transaction Name Resolved": transaction_name_resolved_value,
+            "TECH - Budget Attachment (URLs)": tech_budget_urls,
+            "Furniture budget doc": furniture_budget_doc_value,
+            "reforma": reforma,
+            "property_ready_band": property_ready_band,
+            "budget_attachment_match": budget_attachment_match,
+            "seguro": seguro,
             "inferred_category": inferred_category,
             "inferred_category_source": SOURCE_RULE,
             "inferred_subcategory": inferred_subcategory,
@@ -418,17 +557,29 @@ def main() -> int:
         }
 
         enriched_records.append(enriched)
+        if idx % progress_every == 0 or idx == len(rows):
+            elapsed = time.time() - t0
+            rate = idx / elapsed if elapsed > 0 else 0.0
+            print(
+                f"[progress] {idx}/{len(rows)} "
+                f"({(idx/len(rows)*100 if rows else 0):.1f}%) "
+                f"- {rate:.1f} rows/s"
+            )
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     csv_columns = [
         "airtable_record_id",
+        "incident_id",
         "airtable_created_time",
         "Created date",
+        "Property Ready Date",
         "Resolved date",
         "Days to resolve",
         "Days to evaluate",
+        "Description",
         "UNIQUE ID",
+        "UNIQUE_ID",
         "property_context_id",
         "Area cluster",
         "area_cluster",
@@ -441,6 +592,14 @@ def main() -> int:
         "Internal notes",
         "Technical construction",
         "Transaction Name",
+        "transaction name",
+        "Transaction Name Resolved",
+        "TECH - Budget Attachment (URLs)",
+        "Furniture budget doc",
+        "reforma",
+        "property_ready_band",
+        "budget_attachment_match",
+        "seguro",
         "Renovator name",
         "Property manager",
         "Incidence red flags",
@@ -521,9 +680,30 @@ def main() -> int:
     for k, v in status_dist.most_common():
         print(f"  - {k}: {v}")
 
+    print("new variable distribution:")
+    print("  - reforma:")
+    for k, v in reforma_counter.most_common():
+        print(f"    {k}: {v}")
+    print("  - property_ready_band:")
+    for k, v in property_ready_band_counter.most_common():
+        print(f"    {k}: {v}")
+    print("  - budget_attachment_match:")
+    for k, v in budget_attachment_match_counter.most_common():
+        print(f"    {k}: {v}")
+    print("  - seguro:")
+    for k, v in seguro_counter.most_common():
+        print(f"    {k}: {v}")
+
     print("year distribution:")
     for year, count in sorted(year_dist.items()):
         print(f"  - {year}: {count}")
+
+    print("all output variable completeness (non-empty rows):")
+    total_rows = len(enriched_records)
+    for col in csv_columns:
+        non_empty = sum(1 for item in enriched_records if _is_non_empty(str(item.get(col, ""))))
+        pct = (non_empty / total_rows * 100.0) if total_rows else 0.0
+        print(f"  - {col}: {non_empty}/{total_rows} ({pct:.1f}%)")
 
     print(f"records with description: {records_with_description}")
     print(f"records with property_context_id: {records_with_property_context}")
@@ -531,6 +711,7 @@ def main() -> int:
 
     print(f"saved: {OUTPUT_CSV}")
     print(f"saved: {OUTPUT_JSON}")
+    print(f"total elapsed: {time.time() - t0:.1f}s")
 
     return 0
 

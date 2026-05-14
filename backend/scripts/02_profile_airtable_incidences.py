@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile Airtable Incidences sample and select top candidate incidents."""
+"""Profile Airtable Incidences export and select top candidate incidents."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
-INPUT_CSV = REPO_ROOT / "data" / "airtable_sample" / "incidences_sample.csv"
-INPUT_ATTACHMENTS = REPO_ROOT / "data" / "airtable_sample" / "incidence_attachments_metadata.json"
+INPUT_CSV = REPO_ROOT / "data" / "airtable_full" / "incidences_full.csv"
+INPUT_ATTACHMENTS = REPO_ROOT / "data" / "airtable_full" / "incidence_attachments_metadata_full.json"
 OUTPUT_DIR = REPO_ROOT / "data" / "processed"
 OUTPUT_SUMMARY = OUTPUT_DIR / "airtable_profile_summary.json"
 OUTPUT_CANDIDATES = OUTPUT_DIR / "demo_candidate_incidents.csv"
@@ -290,6 +290,7 @@ def main() -> int:
         "airtable_record_id",
         "airtable_created_time",
         "Created date",
+        "Property Ready Date",
         "Resolved date",
         "Days to resolve",
         "UNIQUE ID",
@@ -297,8 +298,13 @@ def main() -> int:
         "Status",
         "Type",
         "Type Old",
+        "Transaction Name",
         "Renovator name",
+        "Technical construction",
         "Property manager",
+        "Internal notes",
+        "TECH - Budget Attachment (URLs)",
+        "Furniture budget doc",
         "Area cluster",
         "Origin",
         "Description",

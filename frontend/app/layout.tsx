@@ -3,7 +3,7 @@ import { Provider } from "@/components/Provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TriageFixGraph AI",
+  title: "repAIr AI Context Graph",
   description: "Graph-based assistant for housing maintenance incident triage",
 };
 

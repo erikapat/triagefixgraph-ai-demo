@@ -63,6 +63,7 @@ function ResizeHandle({ onDrag }: { onDrag: (delta: number) => void }) {
 export default function Home() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [selectedIncidentId, setSelectedIncidentId] = useState<string | null>(null);
+  const [graphViewMode, setGraphViewMode] = useState<"incident" | "decision" | "schema">("incident");
   const [activePanel, setActivePanel] = useState<PanelId>("chat");
   const [backendStatus, setBackendStatus] = useState<"ok" | "degraded" | "offline">("offline");
   const [leftWidth, setLeftWidth] = useState(400);
@@ -126,9 +127,7 @@ export default function Home() {
       {/* Header */}
       <Flex bg="gray.900" color="white" px={6} py={3} justify="space-between" align="center">
         <Box>
-          <Heading size="md">
-🧠 {DOMAIN.name} Context Graph
-          </Heading>
+          <Heading size="md">🧠 {DOMAIN.name} AI Context Graph</Heading>
           <Text fontSize="sm" color="gray.400">
             {DOMAIN.tagline}
           </Text>
@@ -178,6 +177,7 @@ export default function Home() {
           <ChatInterface
               onGraphUpdate={handleGraphUpdate}
               selectedIncidentId={selectedIncidentId}
+              graphViewMode={graphViewMode}
               onSelectedIncidentChange={setSelectedIncidentId}
               externalInput={askAboutInput}
               onExternalInputConsumed={() => setAskAboutInput(null)}
@@ -200,6 +200,7 @@ export default function Home() {
               selectedIncidentId={selectedIncidentId}
               onSelectedIncidentChange={setSelectedIncidentId}
               onAskAbout={handleAskAbout}
+              onViewModeChange={setGraphViewMode}
             />
           </ErrorBoundary>
         </Box>

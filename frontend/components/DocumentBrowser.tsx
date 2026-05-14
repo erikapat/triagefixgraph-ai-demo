@@ -10,6 +10,7 @@ import {
   Badge,
   Flex,
   Table,
+  Image,
 } from "@chakra-ui/react";
 import { FileText } from "lucide-react";
 import { API_BASE } from "@/lib/config";
@@ -43,8 +44,108 @@ interface DecisionSupportResponse {
   };
 }
 
+interface IncidentRowLite {
+  incident_id: string;
+  category?: string;
+  urgency?: string;
+}
+
+function hashString(input: string): number {
+  let h = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    h = (h * 31 + input.charCodeAt(i)) >>> 0;
+  }
+  return h;
+}
+
+function pickPalette(seed: number): { a: string; b: string; c: string } {
+  const palettes = [
+    { a: "#1d4ed8", b: "#0ea5e9", c: "#e0f2fe" },
+    { a: "#0f766e", b: "#14b8a6", c: "#ccfbf1" },
+    { a: "#7c3aed", b: "#a78bfa", c: "#ede9fe" },
+    { a: "#b45309", b: "#f59e0b", c: "#fef3c7" },
+    { a: "#be123c", b: "#fb7185", c: "#ffe4e6" },
+  ];
+  return palettes[seed % palettes.length];
+}
+
+function getCategoryPalette(category?: string): { a: string; b: string; c: string } {
+  const c = (category || "").toLowerCase();
+  if (c.includes("fontan")) return { a: "#075985", b: "#0ea5e9", c: "#dbeafe" };
+  if (c.includes("electric")) return { a: "#92400e", b: "#f59e0b", c: "#fef3c7" };
+  if (c.includes("cerrad")) return { a: "#1f2937", b: "#6b7280", c: "#e5e7eb" };
+  if (c.includes("humedad") || c.includes("filtr")) return { a: "#0f766e", b: "#14b8a6", c: "#ccfbf1" };
+  if (c.includes("puerta") || c.includes("ventana")) return { a: "#334155", b: "#64748b", c: "#e2e8f0" };
+  if (c.includes("mobili")) return { a: "#7c2d12", b: "#ea580c", c: "#ffedd5" };
+  return pickPalette(hashString(category || "general"));
+}
+
+function getCategoryPhotoUrls(category?: string, incidentId?: string): { incidentPhoto: string; budgetPhoto: string } {
+  const c = (category || "").toLowerCase();
+  const seed = encodeURIComponent(`${incidentId || "incident"}-${category || "general"}`);
+  const fallbackA = `https://picsum.photos/seed/${seed}-a/640/360`;
+  const fallbackB = `https://picsum.photos/seed/${seed}-b/640/360`;
+
+  if (c.includes("fontan")) {
+    return {
+      incidentPhoto: "https://images.unsplash.com/photo-1585704032915-c3400ca199e7?auto=format&fit=crop&w=1200&q=80",
+      budgetPhoto: "https://images.unsplash.com/photo-1558618047-3c8c76ca7d13?auto=format&fit=crop&w=1200&q=80",
+    };
+  }
+  if (c.includes("electric")) {
+    return {
+      incidentPhoto: "https://images.unsplash.com/photo-1581092580497-e0d23cbdf1dc?auto=format&fit=crop&w=1200&q=80",
+      budgetPhoto: "https://images.unsplash.com/photo-1558002038-1055907df827?auto=format&fit=crop&w=1200&q=80",
+    };
+  }
+  if (c.includes("cerrad") || c.includes("puerta") || c.includes("ventana")) {
+    return {
+      incidentPhoto: "https://images.unsplash.com/photo-1558002038-1055907df827?auto=format&fit=crop&w=1200&q=80",
+      budgetPhoto: "https://images.unsplash.com/photo-1616594039964-3cfc4e42c1d0?auto=format&fit=crop&w=1200&q=80",
+    };
+  }
+  if (c.includes("humedad") || c.includes("filtr")) {
+    return {
+      incidentPhoto: "https://images.unsplash.com/photo-1560185007-c5ca9d2c014d?auto=format&fit=crop&w=1200&q=80",
+      budgetPhoto: "https://images.unsplash.com/photo-1554995207-c18c203602cb?auto=format&fit=crop&w=1200&q=80",
+    };
+  }
+  if (c.includes("mobili")) {
+    return {
+      incidentPhoto: "https://images.unsplash.com/photo-1556228453-efd6c1ff04f6?auto=format&fit=crop&w=1200&q=80",
+      budgetPhoto: "https://images.unsplash.com/photo-1505691938895-1758d7feb511?auto=format&fit=crop&w=1200&q=80",
+    };
+  }
+
+  return { incidentPhoto: fallbackA, budgetPhoto: fallbackB };
+}
+
+function buildMockPhotoDataUri(seedKey: string, title: string, subtitle: string, category?: string): string {
+  const seed = hashString(seedKey);
+  const p = getCategoryPalette(category);
+  const short = title.slice(0, 26);
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${p.a}" />
+      <stop offset="100%" stop-color="${p.b}" />
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#g)" />
+  <circle cx="${80 + (seed % 460)}" cy="${70 + (seed % 170)}" r="60" fill="${p.c}" opacity="0.22" />
+  <rect x="24" y="252" width="592" height="84" rx="10" fill="#0f172a" opacity="0.28" />
+  <text x="36" y="286" fill="white" font-family="Arial, sans-serif" font-size="24" font-weight="700">${short}</text>
+  <text x="36" y="316" fill="white" font-family="Arial, sans-serif" font-size="16" opacity="0.88">${subtitle}</text>
+</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
 export function DocumentBrowser({ selectedIncidentId }: { selectedIncidentId?: string | null }) {
   const [support, setSupport] = useState<DecisionSupportResponse | null>(null);
+  const [incidentMeta, setIncidentMeta] = useState<IncidentRowLite | null>(null);
+  const [incidentPhotoFailed, setIncidentPhotoFailed] = useState(false);
+  const [budgetPhotoFailed, setBudgetPhotoFailed] = useState(false);
 
   useEffect(() => {
     async function loadDecisionSupport() {
@@ -68,6 +169,34 @@ export function DocumentBrowser({ selectedIncidentId }: { selectedIncidentId?: s
       }
     }
     loadDecisionSupport();
+  }, [selectedIncidentId]);
+
+  useEffect(() => {
+    setIncidentPhotoFailed(false);
+    setBudgetPhotoFailed(false);
+  }, [selectedIncidentId, incidentMeta?.category]);
+
+  useEffect(() => {
+    async function loadIncidentMeta() {
+      if (!selectedIncidentId) {
+        setIncidentMeta(null);
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/triagefix/incidents`, { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) {
+          setIncidentMeta(null);
+          return;
+        }
+        const data = await res.json();
+        const rows = Array.isArray(data?.incidents) ? (data.incidents as IncidentRowLite[]) : [];
+        const row = rows.find((r) => String(r.incident_id) === String(selectedIncidentId)) || null;
+        setIncidentMeta(row);
+      } catch {
+        setIncidentMeta(null);
+      }
+    }
+    loadIncidentMeta();
   }, [selectedIncidentId]);
 
   return (
@@ -98,6 +227,88 @@ export function DocumentBrowser({ selectedIncidentId }: { selectedIncidentId?: s
           <Text fontSize="sm" color="gray.500">Loading evidence context...</Text>
         ) : (
           <>
+            <Box p={3} borderRadius="md" border="1px solid" borderColor="gray.200">
+              <Text fontSize="xs" color="gray.500" mb={2}>Photo Previews</Text>
+              {!support.evidence.has_incidence_docs ? (
+                <Box
+                  p={3}
+                  borderRadius="md"
+                  border="1px dashed"
+                  borderColor="orange.300"
+                  bg="orange.50"
+                >
+                  <Text fontSize="sm" color="orange.900" fontWeight="semibold">
+                    No hay fotos reales del incidente en evidencia
+                  </Text>
+                  <Text fontSize="xs" color="orange.800" mt={1}>
+                    Estas imágenes son solo referencia visual por categoría, no prueba documental.
+                  </Text>
+                </Box>
+              ) : null}
+              <HStack align="stretch" gap={3} flexWrap="wrap" mt={support.evidence.has_incidence_docs ? 0 : 2}>
+                <Box w="100%" maxW="280px">
+                  {(() => {
+                    const photos = getCategoryPhotoUrls(incidentMeta?.category, selectedIncidentId || undefined);
+                    return (
+                  <Image
+                    src={
+                      incidentPhotoFailed
+                        ? buildMockPhotoDataUri(
+                            `${selectedIncidentId}:incident:${incidentMeta?.category || "general"}`,
+                            `${incidentMeta?.category || "Incident"} ${selectedIncidentId}`,
+                            `${incidentMeta?.urgency || "Normal"} urgency • fallback`,
+                            incidentMeta?.category
+                          )
+                        : photos.incidentPhoto
+                    }
+                    alt={`Incident reference photo ${selectedIncidentId}`}
+                    w="100%"
+                    h="160px"
+                    objectFit="cover"
+                    borderRadius="md"
+                    border="1px solid"
+                    borderColor="gray.200"
+                    onError={() => setIncidentPhotoFailed(true)}
+                  />
+                    );
+                  })()}
+                  <Text fontSize="xs" color="gray.600" mt={1}>
+                    {support.evidence.has_incidence_docs ? "Incident photo" : "Reference photo"} {incidentMeta?.category ? `(${incidentMeta.category})` : ""}
+                  </Text>
+                </Box>
+                <Box w="100%" maxW="280px">
+                  {(() => {
+                    const photos = getCategoryPhotoUrls(incidentMeta?.category, selectedIncidentId || undefined);
+                    return (
+                  <Image
+                    src={
+                      budgetPhotoFailed
+                        ? buildMockPhotoDataUri(
+                            `${selectedIncidentId}:budget:${support.evidence.items.map((x) => x.type).join(",")}`,
+                            "Budget attachment",
+                            `${support.evidence.items.length} evidence types • fallback`,
+                            incidentMeta?.category
+                          )
+                        : photos.budgetPhoto
+                    }
+                    alt={`Budget reference photo ${selectedIncidentId}`}
+                    w="100%"
+                    h="160px"
+                    objectFit="cover"
+                    borderRadius="md"
+                    border="1px solid"
+                    borderColor="gray.200"
+                    onError={() => setBudgetPhotoFailed(true)}
+                  />
+                    );
+                  })()}
+                  <Text fontSize="xs" color="gray.600" mt={1}>
+                    {support.evidence.furniture_budget_count > 0 ? "Budget doc photo" : "Budget reference photo"}
+                  </Text>
+                </Box>
+              </HStack>
+            </Box>
+
             <Box p={3} borderRadius="md" border="1px solid" borderColor="gray.200">
               <Text fontSize="xs" color="gray.500" mb={2}>Evidence Summary</Text>
               <Text fontSize="sm"><b>Has incidence docs:</b> {support.evidence.has_incidence_docs ? "yes" : "no"}</Text>

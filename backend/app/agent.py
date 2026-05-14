@@ -88,7 +88,7 @@ async def get_incident_context(incident_id: str) -> str:
     OPTIONAL MATCH (i)-[:HAS_PROPERTY_CONTEXT]->(p:PropertyContext)
     OPTIONAL MATCH (p)-[:LOCATED_IN_AREA]->(a:AreaCluster)
     OPTIONAL MATCH (i)-[:HAS_CATEGORY]->(c:Category)
-    OPTIONAL MATCH (i)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
+    OPTIONAL MATCH (c)-[:HAS_SUBCATEGORY]->(sc:Subcategory)
     OPTIONAL MATCH (i)-[:HAS_URGENCY]->(u:Urgency)
     OPTIONAL MATCH (i)-[:HAS_STATUS]->(s:Status)
     OPTIONAL MATCH (i)-[:REQUIRES_TRADE]->(t:TradeSpecialist)
@@ -197,23 +197,22 @@ async def get_evidence_coverage() -> str:
     cypher = """
     MATCH (i:Incident:TriageFixManaged {source: $source})
     OPTIONAL MATCH (i)-[:HAS_EVIDENCE]->(e:Evidence)
-    WITH i, e
     WITH
-      count(DISTINCT i) AS total_incidents,
-      collect(DISTINCT CASE WHEN e IS NOT NULL THEN i END) AS evidence_incidents,
-      collect(DISTINCT CASE WHEN coalesce(e.has_incidence_docs, false) THEN i END) AS incidence_docs_incidents,
-      sum(coalesce(e.incidence_docs_count, 0)) AS total_incidence_docs,
-      sum(coalesce(e.lease_contract_count, 0)) AS total_lease_contract_docs,
-      sum(coalesce(e.furniture_budget_count, 0)) AS total_furniture_budget_docs,
-      sum(coalesce(e.finance_invoice_count, 0)) AS total_finance_invoice_docs
+      i,
+      count(e) AS evidence_rows,
+      max(CASE WHEN coalesce(e.has_incidence_docs, false) THEN 1 ELSE 0 END) AS has_incidence_docs_flag,
+      sum(coalesce(e.incidence_docs_count, 0)) AS incidence_docs_count_per_incident,
+      sum(coalesce(e.lease_contract_count, 0)) AS lease_contract_count_per_incident,
+      sum(coalesce(e.furniture_budget_count, 0)) AS furniture_budget_count_per_incident,
+      sum(coalesce(e.finance_invoice_count, 0)) AS finance_invoice_count_per_incident
     WITH
-      total_incidents,
-      size([x IN evidence_incidents WHERE x IS NOT NULL]) AS incidents_with_evidence,
-      size([x IN incidence_docs_incidents WHERE x IS NOT NULL]) AS incidents_with_incidence_docs,
-      total_incidence_docs,
-      total_lease_contract_docs,
-      total_furniture_budget_docs,
-      total_finance_invoice_docs
+      count(i) AS total_incidents,
+      sum(CASE WHEN evidence_rows > 0 THEN 1 ELSE 0 END) AS incidents_with_evidence,
+      sum(has_incidence_docs_flag) AS incidents_with_incidence_docs,
+      sum(incidence_docs_count_per_incident) AS total_incidence_docs,
+      sum(lease_contract_count_per_incident) AS total_lease_contract_docs,
+      sum(furniture_budget_count_per_incident) AS total_furniture_budget_docs,
+      sum(finance_invoice_count_per_incident) AS total_finance_invoice_docs
     RETURN
       total_incidents,
       incidents_with_evidence,
@@ -383,6 +382,13 @@ GLOBAL_SCOPE_HINT_RE = re.compile(
 DRAW_INTENT_RE = re.compile(r"\b(draw|visualize|graph|grafo|dibuja|visualiza|mostrar grafo|show graph)\b", re.IGNORECASE)
 
 
+def _extract_user_message(raw_message: str) -> str:
+    marker = "User message:\n"
+    if marker in raw_message:
+        return raw_message.split(marker, 1)[1].strip()
+    return raw_message
+
+
 def _scope_prefix_for_message(message: str) -> str:
     has_incident_id = INCIDENT_ID_RE.search(message) is not None
     refers_this_incident = THIS_INCIDENT_RE.search(message) is not None
@@ -408,14 +414,15 @@ def _intent_prefix_for_message(message: str) -> str:
 async def handle_message(message: str, session_id: str | None = None) -> dict:
     """Handle an incoming chat message."""
     session_id = resolve_session_id(session_id)
+    user_message = _extract_user_message(message)
 
-    if THIS_INCIDENT_RE.search(message) and not INCIDENT_ID_RE.search(message):
+    if THIS_INCIDENT_RE.search(user_message) and not INCIDENT_ID_RE.search(user_message):
         clarification = (
             "I need an explicit incident id to explain a specific incident. "
             "Please select an incident in the center panel or include an id like "
             "`recRH51V2eHHlTh9W` in your message."
         )
-        await store_message(session_id, "user", message)
+        await store_message(session_id, "user", user_message)
         await store_message(session_id, "assistant", clarification)
         return {
             "response": clarification,
@@ -426,20 +433,20 @@ async def handle_message(message: str, session_id: str | None = None) -> dict:
         }
 
     scoped_message = message
-    match = INCIDENT_ID_RE.search(message)
+    match = INCIDENT_ID_RE.search(user_message)
     if match:
         scoped_message = (
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
     scoped_message = (
-        f"{_scope_prefix_for_message(message)}\n"
-        f"{_intent_prefix_for_message(message)}\n\n"
+        f"{_scope_prefix_for_message(user_message)}\n"
+        f"{_intent_prefix_for_message(user_message)}\n\n"
         f"{scoped_message}"
     )
 
-    await store_message(session_id, "user", message)
-    context = await get_context(session_id, query=message)
+    await store_message(session_id, "user", user_message)
+    context = await get_context(session_id, query=user_message)
     history = context.get("messages", [])
 
     if history:
@@ -472,10 +479,11 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
     from app.context_graph_client import get_collector
 
     session_id = resolve_session_id(session_id)
+    user_message = _extract_user_message(message)
 
     collector = get_collector()
 
-    if THIS_INCIDENT_RE.search(message) and not INCIDENT_ID_RE.search(message):
+    if THIS_INCIDENT_RE.search(user_message) and not INCIDENT_ID_RE.search(user_message):
         clarification = (
             "I need an explicit incident id to explain a specific incident. "
             "Please select an incident in the center panel or include an id like "
@@ -486,20 +494,20 @@ async def handle_message_stream(message: str, session_id: str | None = None) -> 
         return {"response": clarification, "session_id": session_id, "graph_data": None}
 
     scoped_message = message
-    match = INCIDENT_ID_RE.search(message)
+    match = INCIDENT_ID_RE.search(user_message)
     if match:
         scoped_message = (
             f"Use incident_id={match.group(0)} as the primary incident for context tools.\n\n"
             f"{message}"
         )
     scoped_message = (
-        f"{_scope_prefix_for_message(message)}\n"
-        f"{_intent_prefix_for_message(message)}\n\n"
+        f"{_scope_prefix_for_message(user_message)}\n"
+        f"{_intent_prefix_for_message(user_message)}\n\n"
         f"{scoped_message}"
     )
 
-    await store_message(session_id, "user", message)
-    context = await get_context(session_id, query=message)
+    await store_message(session_id, "user", user_message)
+    context = await get_context(session_id, query=user_message)
     history = context.get("messages", [])
 
     if history:

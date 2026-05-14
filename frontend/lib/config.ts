@@ -1,10 +1,10 @@
 /**
- * Domain configuration for TriageFixGraph AI
+ * Domain configuration for repAIr
  */
 
 export const DOMAIN = {
   id: "triagefix",
-  name: "TriageFixGraph AI",
+  name: "repAIr",
   description: "Graph-based assistant for housing maintenance incident triage",
   tagline: "Housing maintenance incident triage",
 };
